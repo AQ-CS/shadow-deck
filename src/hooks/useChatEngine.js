@@ -116,30 +116,29 @@ async function bridgeFetchDiff(projectRoot) {
 async function streamGenerate(promptPayload, onChunk, signal) {
     const { system, user, model } = promptPayload;
 
-    const res = await fetch(`${BRIDGE}/ai/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model,
-            // STATELESS: exactly two messages — system + user. No history ever.
-            messages: [
-                { role: 'system', content: system },
-                { role: 'user', content: user },
-            ],
-            stream: true,
-            options: {
-                // FIX #2: Bumped from 4096 → 8192 to handle real-world files.
-                // DeepSeek-R1 14B supports up to 32k tokens natively. 8192 is
-                // a safe ceiling that fits comfortably on 12GB+ VRAM cards.
-                // Files over 16k tokens are rejected upstream by TaskQueueEngine
-                // so this window will never be saturated in normal operation.
-                num_ctx: 8192,
-                temperature: 0.1,    // Deterministic for JSON-emitting agents
-                repeat_penalty: 1.05,
-            },
-        }),
-        signal,
-    });
+    let res;
+    try {
+        res = await fetch(`${BRIDGE}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model,
+                messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: user },
+                ],
+                stream: true,
+                options: {
+                    num_ctx: 8192,
+                    temperature: 0.1,
+                    repeat_penalty: 1.05,
+                },
+            }),
+            signal,
+        });
+    } catch (err) {
+        throw new Error(`Fetch failed: ${err.message}`);
+    }
 
     if (!res.ok) throw new Error(`Bridge responded ${res.status}: ${await res.text()}`);
     if (!res.body) throw new Error('Bridge returned an empty response body');
@@ -152,6 +151,7 @@ async function streamGenerate(promptPayload, onChunk, signal) {
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (!value) continue;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -221,6 +221,7 @@ export function useChatEngine({
         rafRef.current = requestAnimationFrame(() => {
             rafDirty = false;
             setStreamBuffer(streamRef.current);
+            rafRef.current = null;
         });
     }, []);
 
@@ -460,9 +461,10 @@ export function useChatEngine({
 
         } finally {
             // ── CRITICAL: Drop all context before the next task ──────────────
-            // Zero-out every reference to the payload so GC can reclaim the memory.
-            // This is the guarantee that File A's context never bleeds into File B.
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            if (rafRef.current) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
+            }
             setIsRunning(false);
             setActiveTask(null);
             setStreamBuffer('');

@@ -7,28 +7,28 @@ import { hexToRgb } from "@/lib/utils"
  * @param {{ color?: string }} props - Hex accent color (default: "#14b8a6")
  */
 export function InterstellarShader({ color = "#14b8a6" }) {
-    const containerRef = useRef(null)
-    const sceneRef = useRef(null)
-    const colorRef = useRef(hexToRgb(color))
+  const containerRef = useRef(null)
+  const sceneRef = useRef(null)
+  const colorRef = useRef(hexToRgb(color))
 
-    useEffect(() => {
-        colorRef.current = hexToRgb(color)
-        if (sceneRef.current?.uniforms?.uAccent) {
-            sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
-        }
-    }, [color])
+  useEffect(() => {
+    colorRef.current = hexToRgb(color)
+    if (sceneRef.current?.uniforms?.uAccent) {
+      sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
+    }
+  }, [color])
 
-    useEffect(() => {
-        if (!containerRef.current) return
-        const container = containerRef.current
+  useEffect(() => {
+    if (!containerRef.current) return
+    const container = containerRef.current
 
-        const vertexShader = `
+    const vertexShader = `
       void main() {
         gl_Position = vec4( position, 1.0 );
       }
     `
 
-        const fragmentShader = `
+    const fragmentShader = `
       #define TWO_PI 6.2831853072
       #define PI 3.14159265359
 
@@ -68,72 +68,72 @@ export function InterstellarShader({ color = "#14b8a6" }) {
       }
     `
 
-        const camera = new THREE.Camera()
-        camera.position.z = 1
-        const scene = new THREE.Scene()
-        const geometry = new THREE.PlaneGeometry(2, 2)
+    const camera = new THREE.Camera()
+    camera.position.z = 1
+    const scene = new THREE.Scene()
+    const geometry = new THREE.PlaneGeometry(2, 2)
 
-        const rgb = colorRef.current
-        const uniforms = {
-            time: { type: "f", value: 1.0 },
-            resolution: { type: "v2", value: new THREE.Vector2() },
-            uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
+    const rgb = colorRef.current
+    const uniforms = {
+      time: { type: "f", value: 1.0 },
+      resolution: { type: "v2", value: new THREE.Vector2() },
+      uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
+    }
+
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader,
+      fragmentShader,
+    })
+
+    const mesh = new THREE.Mesh(geometry, material)
+    scene.add(mesh)
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(window.devicePixelRatio)
+    container.appendChild(renderer.domElement)
+
+    const onWindowResize = () => {
+      const width = container.clientWidth
+      const height = container.clientHeight
+      renderer.setSize(width, height)
+      uniforms.resolution.value.x = renderer.domElement.width
+      uniforms.resolution.value.y = renderer.domElement.height
+    }
+    onWindowResize()
+    window.addEventListener("resize", onWindowResize, false)
+
+    const animate = () => {
+      const animationId = requestAnimationFrame(animate)
+      uniforms.time.value += 0.05
+      const c = colorRef.current
+      uniforms.uAccent.value.set(c[0], c[1], c[2])
+      renderer.render(scene, camera)
+      if (sceneRef.current) sceneRef.current.animationId = animationId
+    }
+
+    sceneRef.current = { camera, scene, renderer, uniforms, animationId: 0 }
+    animate()
+
+    return () => {
+      window.removeEventListener("resize", onWindowResize)
+      if (sceneRef.current) {
+        if (sceneRef.current.animationId) cancelAnimationFrame(sceneRef.current.animationId)
+        if (container && sceneRef.current.renderer?.domElement) {
+          container.removeChild(sceneRef.current.renderer.domElement)
         }
+        if (sceneRef.current.renderer) sceneRef.current.renderer.dispose()
+        geometry.dispose()
+        material.dispose()
+      }
+    }
+  }, [])
 
-        const material = new THREE.ShaderMaterial({
-            uniforms,
-            vertexShader,
-            fragmentShader,
-        })
-
-        const mesh = new THREE.Mesh(geometry, material)
-        scene.add(mesh)
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true })
-        renderer.setPixelRatio(window.devicePixelRatio)
-        container.appendChild(renderer.domElement)
-
-        const onWindowResize = () => {
-            const width = container.clientWidth
-            const height = container.clientHeight
-            renderer.setSize(width, height)
-            uniforms.resolution.value.x = renderer.domElement.width
-            uniforms.resolution.value.y = renderer.domElement.height
-        }
-        onWindowResize()
-        window.addEventListener("resize", onWindowResize, false)
-
-        const animate = () => {
-            const animationId = requestAnimationFrame(animate)
-            uniforms.time.value += 0.05
-            const c = colorRef.current
-            uniforms.uAccent.value.set(c[0], c[1], c[2])
-            renderer.render(scene, camera)
-            if (sceneRef.current) sceneRef.current.animationId = animationId
-        }
-
-        sceneRef.current = { camera, scene, renderer, uniforms, animationId: 0 }
-        animate()
-
-        return () => {
-            window.removeEventListener("resize", onWindowResize)
-            if (sceneRef.current) {
-                cancelAnimationFrame(sceneRef.current.animationId)
-                if (container && sceneRef.current.renderer.domElement) {
-                    container.removeChild(sceneRef.current.renderer.domElement)
-                }
-                sceneRef.current.renderer.dispose()
-                geometry.dispose()
-                material.dispose()
-            }
-        }
-    }, [])
-
-    return (
-        <div
-            ref={containerRef}
-            className="w-full h-screen"
-            style={{ background: "#000", overflow: "hidden" }}
-        />
-    )
+  return (
+    <div
+      ref={containerRef}
+      className="w-full h-screen"
+      style={{ background: "#000", overflow: "hidden" }}
+    />
+  )
 }

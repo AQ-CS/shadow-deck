@@ -204,164 +204,171 @@ export function startBridge(mainWindow, userDataPath) {
     ]);
 
     app.post('/git/diff', async (req, res) => {
-        const cwd = req.body?.projectPath || activeProjectPath || path.resolve(__dirname, '..');
-        console.log(`[BRIDGE/git/diff] cwd=${cwd} | activeProjectPath=${activeProjectPath ?? 'NOT SET'}`);
+        try {
+            const cwd = req.body?.projectPath || activeProjectPath || path.resolve(__dirname, '..');
+            console.log(`[BRIDGE/git/diff] cwd=${cwd} | activeProjectPath=${activeProjectPath ?? 'NOT SET'}`);
 
-        // ── Helper: run git command and collect stdout ──────────────────────────
-        const runGit = (args) => new Promise((resolve) => {
-            let out = '', err = '';
-            const child = spawn('git', args, { cwd });
-            child.stdout.on('data', d => out += d);
-            child.stderr.on('data', d => err += d);
-            child.on('error', () => resolve({ output: '', error: err, code: -1 }));
-            child.on('close', code => resolve({ output: out, error: err, code }));
-        });
+            // ── Helper: run git command and collect stdout ──────────────────────────
+            const runGit = (args) => new Promise((resolve) => {
+                let out = '', err = '';
+                const child = spawn('git', args, { cwd });
+                child.stdout.on('data', d => out += d);
+                child.stderr.on('data', d => err += d);
+                child.on('error', () => resolve({ output: '', error: err, code: -1 }));
+                child.on('close', code => resolve({ output: out, error: err, code }));
+            });
 
-        // ── Helper: stream git command with a soft memory cap ──────────────────
-        // Stops collecting after MAX_DIFF_BYTES but does NOT kill the process.
-        const streamGit = (args) => new Promise((resolve) => {
-            const child = spawn('git', args, { cwd });
-            const chunks = [];
+            // ── Helper: stream git command with a soft memory cap ──────────────────
+            // Stops collecting after MAX_DIFF_BYTES but does NOT kill the process.
+            const streamGit = (args) => new Promise((resolve) => {
+                const child = spawn('git', args, { cwd });
+                const chunks = [];
+                let totalBytes = 0;
+                let softCapped = false;
+                let err = '';
+
+                child.stdout.on('data', (data) => {
+                    if (softCapped) return; // stop collecting but let process finish
+                    totalBytes += data.length;
+                    if (totalBytes > MAX_DIFF_BYTES) {
+                        softCapped = true;
+                        console.warn(`[BRIDGE/git/diff] Soft cap (${MAX_DIFF_BYTES / 1024 / 1024}MB) reached — truncating collection`);
+                        return;
+                    }
+                    chunks.push(data);
+                });
+                child.stderr.on('data', d => err += d);
+                child.on('error', () => resolve({ output: '', error: err, truncated: false }));
+                child.on('close', () => {
+                    const output = Buffer.concat(chunks).toString('utf-8');
+                    resolve({ output, error: err, truncated: softCapped });
+                });
+            });
+
+            // ── 1. Check if repo has any commits ───────────────────────────────────
+            const headCheck = await runGit(['rev-parse', '--verify', 'HEAD']);
+            const hasCommits = headCheck.code === 0;
+
+            // ── 2. Collect status for diagnostics ──────────────────────────────────
+            const statusResult = await runGit(['status', '--porcelain=v1']);
+            const statusLines = statusResult.output.split('\n').filter(Boolean);
+            const stagedFiles = statusLines.filter(l => l[0] !== ' ' && l[0] !== '?').map(l => l.slice(3));
+            const unstagedFiles = statusLines.filter(l => l[1] === 'M' || l[1] === 'D').map(l => l.slice(3));
+            const untrackedFiles = statusLines.filter(l => l.startsWith('??')).map(l => l.slice(3));
+
+            const diagnostics = { cwd, hasCommits, stagedFiles, unstagedFiles, untrackedCount: untrackedFiles.length };
+            console.log(`[BRIDGE/git/diff] status: ${stagedFiles.length} staged, ${unstagedFiles.length} unstaged, ${untrackedFiles.length} untracked, hasCommits=${hasCommits}`);
+
+            let diffParts = [];
             let totalBytes = 0;
-            let softCapped = false;
-            let err = '';
+            let truncated = false;
 
-            child.stdout.on('data', (data) => {
-                if (softCapped) return; // stop collecting but let process finish
-                totalBytes += data.length;
-                if (totalBytes > MAX_DIFF_BYTES) {
-                    softCapped = true;
-                    console.warn(`[BRIDGE/git/diff] Soft cap (${MAX_DIFF_BYTES / 1024 / 1024}MB) reached — truncating collection`);
-                    return;
-                }
-                chunks.push(data);
-            });
-            child.stderr.on('data', d => err += d);
-            child.on('error', () => resolve({ output: '', error: err, truncated: false }));
-            child.on('close', () => {
-                const output = Buffer.concat(chunks).toString('utf-8');
-                resolve({ output, error: err, truncated: softCapped });
-            });
-        });
+            const appendPart = (text, partTruncated = false) => {
+                if (!text || !text.trim()) return;
+                totalBytes += Buffer.byteLength(text);
+                diffParts.push(text.trim());
+                if (partTruncated) truncated = true;
+            };
 
-        // ── 1. Check if repo has any commits ───────────────────────────────────
-        const headCheck = await runGit(['rev-parse', '--verify', 'HEAD']);
-        const hasCommits = headCheck.code === 0;
+            const EXCLUDE_SPECS = [
+                ':!**/node_modules/**',
+                ':!**/package-lock.json',
+                ':!**/yarn.lock',
+                ':!**/pnpm-lock.yaml',
+                ':!**/bun.lockb',
+                ':!**/*.min.js',
+                ':!**/*.map',
+                ':!**/dist/**',
+                ':!**/build/**',
+                ':!**/release/**',
+                ':!**/repomix-output.xml'
+            ];
 
-        // ── 2. Collect status for diagnostics ──────────────────────────────────
-        const statusResult = await runGit(['status', '--porcelain=v1']);
-        const statusLines = statusResult.output.split('\n').filter(Boolean);
-        const stagedFiles = statusLines.filter(l => l[0] !== ' ' && l[0] !== '?').map(l => l.slice(3));
-        const unstagedFiles = statusLines.filter(l => l[1] === 'M' || l[1] === 'D').map(l => l.slice(3));
-        const untrackedFiles = statusLines.filter(l => l.startsWith('??')).map(l => l.slice(3));
+            // ── 3. Unstaged changes to tracked files ───────────────────────────────
+            const unstagedResult = await streamGit(['diff', '--', '.', ...EXCLUDE_SPECS]);
+            appendPart(unstagedResult.output, unstagedResult.truncated);
 
-        const diagnostics = { cwd, hasCommits, stagedFiles, unstagedFiles, untrackedCount: untrackedFiles.length };
-        console.log(`[BRIDGE/git/diff] status: ${stagedFiles.length} staged, ${unstagedFiles.length} unstaged, ${untrackedFiles.length} untracked, hasCommits=${hasCommits}`);
-
-        let diffParts = [];
-        let totalBytes = 0;
-        let truncated = false;
-
-        const appendPart = (text, partTruncated = false) => {
-            if (!text || !text.trim()) return;
-            totalBytes += Buffer.byteLength(text);
-            diffParts.push(text.trim());
-            if (partTruncated) truncated = true;
-        };
-
-        const EXCLUDE_SPECS = [
-            ':!**/node_modules/**',
-            ':!**/package-lock.json',
-            ':!**/yarn.lock',
-            ':!**/pnpm-lock.yaml',
-            ':!**/bun.lockb',
-            ':!**/*.min.js',
-            ':!**/*.map',
-            ':!**/dist/**',
-            ':!**/build/**',
-            ':!**/release/**',
-            ':!**/repomix-output.xml'
-        ];
-
-        // ── 3. Unstaged changes to tracked files ───────────────────────────────
-        const unstagedResult = await streamGit(['diff', '--', '.', ...EXCLUDE_SPECS]);
-        appendPart(unstagedResult.output, unstagedResult.truncated);
-
-        // ── 4. Staged (cached) changes ─────────────────────────────────────────
-        if (!truncated) {
-            const stagedResult = await streamGit(['diff', '--cached', '--', '.', ...EXCLUDE_SPECS]);
-            appendPart(stagedResult.output, stagedResult.truncated);
-        }
-
-        // ── 5. If HEAD exists and parts are still empty, try diff HEAD ─────────
-        if (hasCommits && diffParts.length === 0 && !truncated) {
-            const headDiff = await streamGit(['diff', 'HEAD', '--', '.', ...EXCLUDE_SPECS]);
-            appendPart(headDiff.output, headDiff.truncated);
-        }
-
-        // ── 6. New untracked files — read content and format as fake diff ──────
-        let untrackedBytes = 0;
-
-        for (const file of untrackedFiles) {
-            if (truncated || untrackedBytes > MAX_UNTRACKED_TOTAL_BYTES) break;
-            if (NOISE_FILES_SET.has(path.basename(file))) continue;
-            try {
-                const absPath = path.join(cwd, file.trim());
-                const stat = fs.statSync(absPath);
-                if (!stat.isFile() || stat.size > MAX_UNTRACKED_FILE_BYTES) continue;
-                untrackedBytes += stat.size;
-                const content = fs.readFileSync(absPath, 'utf-8');
-                const lines = content.split('\n');
-                const fakeDiff = `diff --git a/${file.trim()} b/${file.trim()}\nnew file mode 100644\n--- /dev/null\n+++ b/${file.trim()}\n@@ -0,0 +1,${lines.length} @@\n` +
-                    lines.map(l => `+${l}`).join('\n');
-                appendPart(fakeDiff);
-            } catch { /* skip unreadable */ }
-        }
-
-        const rawDiff = diffParts.join('\n\n');
-
-        // ── 7. BULLETPROOF NODE.JS FILTER ──────────────────────────────────────
-        // Immune to Windows Git pathspec bugs. Forcibly strips noise from the output.
-        const filterDiff = (diffText) => {
-            // Split diff into per-file chunks while keeping the 'diff --git' header intact
-            const chunks = diffText.split(/(?=^diff --git a\/)/m);
-
-            const BAD_FILES = new Set([
-                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
-                'repomix-output.xml', 'diff_output.json' // <-- Strips your debug dumps!
-            ]);
-
-            const ignoredList = [];
-
-            const filteredChunks = chunks.filter(chunk => {
-                const match = chunk.match(/^diff --git a\/.+ b\/(.+)$/m);
-                if (!match) return true; // Keep metadata/preamble
-
-                const filepath = match[1].trim();
-                const filename = filepath.split(/[/\\]/).pop();
-
-                // Nuke lockfiles and debug dumps
-                if (BAD_FILES.has(filename)) { ignoredList.push(filepath); return false; }
-
-                // Nuke minified bundles and compiled directories
-                if (filepath.includes('node_modules/') || filepath.includes('dist/')) { ignoredList.push(filepath); return false; }
-                if (filename.endsWith('.map') || filename.endsWith('.min.js') || filename.endsWith('.svg')) { ignoredList.push(filepath); return false; }
-
-                return true; // Keep everything else
-            });
-
-            if (ignoredList.length > 0) {
-                console.log(`[BRIDGE/git/diff] ⛔ Filtered out ${ignoredList.length} noise files:`);
-                ignoredList.forEach(f => console.log(`    - ${f}`));
+            // ── 4. Staged (cached) changes ─────────────────────────────────────────
+            if (!truncated) {
+                const stagedResult = await streamGit(['diff', '--cached', '--', '.', ...EXCLUDE_SPECS]);
+                appendPart(stagedResult.output, stagedResult.truncated);
             }
 
-            return filteredChunks.join('').trim();
-        };
+            // ── 5. If HEAD exists and parts are still empty, try diff HEAD ─────────
+            if (hasCommits && diffParts.length === 0 && !truncated) {
+                const headDiff = await streamGit(['diff', 'HEAD', '--', '.', ...EXCLUDE_SPECS]);
+                appendPart(headDiff.output, headDiff.truncated);
+            }
 
-        const diff = filterDiff(rawDiff);
+            // ── 6. New untracked files — read content and format as fake diff ──────
+            let untrackedBytes = 0;
 
-        console.log(`[BRIDGE/git/diff] result: ${diff.length.toLocaleString()} chars (filtered down from ${rawDiff.length.toLocaleString()}), truncated=${truncated}`);
-        res.json({ diff, truncated, diagnostics });
+            for (const file of untrackedFiles) {
+                if (truncated || untrackedBytes > MAX_UNTRACKED_TOTAL_BYTES) break;
+                if (NOISE_FILES_SET.has(path.basename(file))) continue;
+                try {
+                    const absPath = path.join(cwd, file.trim());
+                    const stat = fs.statSync(absPath);
+                    if (!stat.isFile() || stat.size > MAX_UNTRACKED_FILE_BYTES) continue;
+                    untrackedBytes += stat.size;
+                    const content = fs.readFileSync(absPath, 'utf-8');
+                    const lines = content.split('\n');
+                    const fakeDiff = `diff --git a/${file.trim()} b/${file.trim()}\nnew file mode 100644\n--- /dev/null\n+++ b/${file.trim()}\n@@ -0,0 +1,${lines.length} @@\n` +
+                        lines.map(l => `+${l}`).join('\n');
+                    appendPart(fakeDiff);
+                } catch { /* skip unreadable */ }
+            }
+
+            const rawDiff = diffParts.join('\n\n');
+
+            // ── 7. BULLETPROOF NODE.JS FILTER ──────────────────────────────────────
+            // Immune to Windows Git pathspec bugs. Forcibly strips noise from the output.
+            const filterDiff = (diffText) => {
+                // Split diff into per-file chunks while keeping the 'diff --git' header intact
+                const chunks = diffText.split(/(?=^diff --git a\/)/m);
+
+                const BAD_FILES = new Set([
+                    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+                    'repomix-output.xml', 'diff_output.json' // <-- Strips your debug dumps!
+                ]);
+
+                const ignoredList = [];
+
+                const filteredChunks = chunks.filter(chunk => {
+                    const match = chunk.match(/^diff --git a\/.+ b\/(.+)$/m);
+                    if (!match) return true; // Keep metadata/preamble
+
+                    const filepath = match[1].trim();
+                    const filename = filepath.split(/[/\\]/).pop();
+
+                    // Nuke lockfiles and debug dumps
+                    if (BAD_FILES.has(filename)) { ignoredList.push(filepath); return false; }
+
+                    // Nuke minified bundles and compiled directories
+                    if (filepath.includes('node_modules/') || filepath.includes('dist/')) { ignoredList.push(filepath); return false; }
+                    if (filename.endsWith('.map') || filename.endsWith('.min.js') || filename.endsWith('.svg')) { ignoredList.push(filepath); return false; }
+
+                    return true; // Keep everything else
+                });
+
+                if (ignoredList.length > 0) {
+                    console.log(`[BRIDGE/git/diff] ⛔ Filtered out ${ignoredList.length} noise files:`);
+                    ignoredList.forEach(f => console.log(`    - ${f}`));
+                }
+
+                return filteredChunks.join('').trim();
+            };
+
+            const diff = filterDiff(rawDiff);
+
+            console.log(`[BRIDGE/git/diff] result: ${diff.length.toLocaleString()} chars (filtered down from ${rawDiff.length.toLocaleString()}), truncated=${truncated}`);
+            res.json({ diff, truncated, diagnostics });
+        } catch (error) {
+            console.error('[BRIDGE/git/diff] Error:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: error.message });
+            }
+        }
     });
 
     // ── Project file ─────────────────────────────────────────────────────────
@@ -369,9 +376,9 @@ export function startBridge(mainWindow, userDataPath) {
     app.get('/project/file', (req, res) => {
         if (!activeProjectPath) return res.status(400).json({ error: 'No project connected' });
         const rel = req.query.rel;
-        if (!rel) return res.status(400).json({ error: 'Missing ?rel= parameter' });
+        if (!rel || typeof String(rel) !== 'string') return res.status(400).json({ error: 'Missing ?rel= parameter' });
 
-        const absPath = path.resolve(activeProjectPath, rel);
+        const absPath = path.resolve(activeProjectPath, String(rel));
         if (!absPath.startsWith(path.resolve(activeProjectPath))) {
             return res.status(403).json({ error: 'Path traversal rejected' });
         }
@@ -485,12 +492,12 @@ export function startBridge(mainWindow, userDataPath) {
         });
 
         const writeChunk = (type, data) => {
-            if (capped) return;
+            if (capped || res.writableEnded) return;
             outputBytes += data.length;
             if (outputBytes > MAX_OUTPUT_BYTES) {
                 capped = true;
-                res.write(JSON.stringify({ type: 'stderr', data: '\n[OUTPUT CAP REACHED — truncated at 512KB]' }) + '\n');
-                child.kill('SIGTERM');
+                try { res.write(JSON.stringify({ type: 'stderr', data: '\n[OUTPUT CAP REACHED — truncated at 512KB]' }) + '\n'); } catch (e) { }
+                try { child.kill('SIGTERM'); } catch (e) { }
                 return;
             }
             try {
@@ -503,7 +510,16 @@ export function startBridge(mainWindow, userDataPath) {
         child.stdout?.on('data', (data) => writeChunk('stdout', data));
         child.stderr?.on('data', (data) => writeChunk('stderr', data));
 
+        const reqCloseHandler = () => {
+            if (!child.killed) child.kill('SIGTERM');
+        };
+
+        const cleanup = () => {
+            req.off('close', reqCloseHandler);
+        };
+
         child.on('close', (code) => {
+            cleanup();
             if (!res.headersSent && !res.writableEnded) return;
             try {
                 res.write(JSON.stringify({ type: 'exit', code: code ?? 0 }) + '\n');
@@ -513,6 +529,7 @@ export function startBridge(mainWindow, userDataPath) {
         });
 
         child.on('error', (err) => {
+            cleanup();
             console.error(`[BRIDGE/exec] spawn error: ${err.message}`);
             try {
                 res.write(JSON.stringify({ type: 'error', message: err.message }) + '\n');
@@ -521,9 +538,7 @@ export function startBridge(mainWindow, userDataPath) {
         });
 
         // Clean up if client disconnects
-        req.on('close', () => {
-            if (!child.killed) child.kill('SIGTERM');
-        });
+        req.on('close', reqCloseHandler);
     });
 
     // ── Store: Config ─────────────────────────────────────────────────────────
@@ -602,7 +617,8 @@ import { startBridge } from './bridge.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-let mainWindow;
+// mainWindow acts as the primary app window
+let mainWindow = null;
 
 const LOCAL_OLLAMA_PATH = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Ollama', 'ollama.exe');
 
@@ -623,13 +639,15 @@ function checkFirstRun() {
             .then(() => { /* API responding — all good */ })
             .catch(() => {
                 // All three checks failed — show setup dialog
-                dialog.showMessageBox(mainWindow, {
-                    type: 'warning',
-                    title: 'ShadowDeck — Setup Required',
-                    message: 'Ollama is not installed or not reachable.',
-                    detail: 'ShadowDeck requires Ollama for local AI inference.\n\nRun "npm run setup" from the project root, or install Ollama manually from https://ollama.com.',
-                    buttons: ['OK'],
-                });
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    dialog.showMessageBox(mainWindow, {
+                        type: 'warning',
+                        title: 'ShadowDeck — Setup Required',
+                        message: 'Ollama is not installed or not reachable.',
+                        detail: 'ShadowDeck requires Ollama for local AI inference.\n\nRun "npm run setup" from the project root, or install Ollama manually from https://ollama.com.',
+                        buttons: ['OK'],
+                    });
+                }
             });
     });
 }
@@ -666,20 +684,32 @@ function createWindow() {
 
     // ── Open-directory dialog for manual project connection ──
     ipcMain.handle('dialog-open-project', async () => {
-        const result = await dialog.showOpenDialog(mainWindow, {
-            title: 'Connect Project Workspace',
-            properties: ['openDirectory'],
-        });
-        if (result.canceled || result.filePaths.length === 0) return null;
-        return result.filePaths[0];
+        try {
+            if (!mainWindow || mainWindow.isDestroyed()) return null;
+            const result = await dialog.showOpenDialog(mainWindow, {
+                title: 'Connect Project Workspace',
+                properties: ['openDirectory'],
+            });
+            if (result.canceled || result.filePaths.length === 0) return null;
+            return result.filePaths[0];
+        } catch (error) {
+            console.error('[MAIN] error in dialog-open-project:', error);
+            return null;
+        }
     });
 
     // ── Directory picker for CommandCenter ──
     ipcMain.handle('dialog:openDirectory', async () => {
-        return dialog.showOpenDialog(mainWindow, {
-            properties: ['openDirectory'],
-            title: 'Select Project Root',
-        });
+        try {
+            if (!mainWindow || mainWindow.isDestroyed()) return { canceled: true, filePaths: [] };
+            return await dialog.showOpenDialog(mainWindow, {
+                properties: ['openDirectory'],
+                title: 'Select Project Root',
+            });
+        } catch (error) {
+            console.error('[MAIN] error in dialog:openDirectory:', error);
+            return { canceled: true, filePaths: [] };
+        }
     });
 
     // Run first-run check after window is ready
@@ -756,8 +786,9 @@ export function initStore(dataPath) {
 
 export function getConfig() {
     if (!configCache) configCache = readJSON(configPath(), { ...DEFAULT_CONFIG });
+    const localCache = configCache || {};
     // Merge with defaults to fill any missing keys from older configs
-    return { ...DEFAULT_CONFIG, ...configCache, apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...configCache?.apiKeys }, ui: { ...DEFAULT_CONFIG.ui, ...configCache?.ui } };
+    return { ...DEFAULT_CONFIG, ...localCache, apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...(localCache?.apiKeys || {}) }, ui: { ...DEFAULT_CONFIG.ui, ...(localCache?.ui || {}) } };
 }
 
 export function setConfig(patch) {
@@ -772,11 +803,12 @@ export function setConfig(patch) {
 
 export function getHistory() {
     if (!historyCache) historyCache = readJSON(historyPath(), []);
-    return historyCache;
+    return historyCache || [];
 }
 
 export function saveSession(sessionData) {
     if (!historyCache) historyCache = readJSON(historyPath(), []);
+    if (!historyCache) historyCache = [];
 
     // Find if session already exists
     const existingIndex = historyCache.findIndex(s => s.id === sessionData.id);
@@ -800,7 +832,8 @@ export function saveSession(sessionData) {
 
 export function clearHistory() {
     historyCache = [];
-    writeJSON(historyPath(), historyCache);
+    // Ensure synchronous write to prevent data loss on crash
+    try { writeJSON(historyPath(), historyCache); } catch (err) { console.error(err); }
 }
 </file>
 
@@ -1261,7 +1294,7 @@ export default function App() {
         apiKeys: { ...prev.apiKeys, ...stored?.apiKeys },
         ui: { ...prev.ui, ...stored?.ui },
       })))
-      .catch(() => { });
+      .catch((err) => { console.error('[STORE] Failed to load config', err); });
   }, []);
 
   // ── Config helpers ────────────────────────────────────────────────────────
@@ -1275,7 +1308,7 @@ export default function App() {
       fetch(`${BRIDGE}/store/config`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated),
-      }).catch(() => { });
+      }).catch((err) => { console.error('[STORE] Failed to save config', err); });
       return updated;
     });
   }, []);
@@ -1307,7 +1340,7 @@ export default function App() {
 
   // ── Clear history ─────────────────────────────────────────────────────────
   const handleClearHistory = useCallback(() => {
-    fetch(`${BRIDGE}/store/history`, { method: 'DELETE' }).catch(() => { });
+    fetch(`${BRIDGE}/store/history`, { method: 'DELETE' }).catch((err) => { console.error('[STORE] Failed to clear history', err); });
   }, []);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1613,6 +1646,9 @@ export default TerminalLog;
 //     background bleeds through around the edges.
 //  3. The outer wrapper uses `h-full w-full` (fits inside App's padded container)
 //     vs the old `h-screen w-screen` (which always covered the entire viewport).
+//  FIX #7: Added a dedicated [ 📁 Change Project ] button in the title bar logo
+//     area (WebkitAppRegion: no-drag). Wires to the existing onConnectProject prop
+//     without disrupting the drag region or window controls.
 // ────────────────────────────────────────────────────────────────────────────
 
 import React, { useState } from 'react';
@@ -1620,7 +1656,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     MessageSquare, History, Settings, FlaskConical,
     Minus, X, Maximize2, Zap, ChevronRight, Sun,
-    FileCode2, Link2,
+    FileCode2, Link2, FolderOpen,
 } from 'lucide-react';
 
 const { ipcRenderer } = window.require('electron');
@@ -1778,9 +1814,6 @@ export function Shell({
     };
 
     // ── Root wrapper ──────────────────────────────────────────────────────────
-    // floating=true  → fills its parent container (App provides p-4 margins)
-    //                   + rounded corners + box-shadow for the "glass card" look
-    // floating=false → legacy full-screen (backward compat)
     const rootClass = floating
         ? 'flex flex-col h-full w-full overflow-hidden font-mono'
         : 'flex flex-col h-screen w-screen overflow-hidden font-mono';
@@ -1810,11 +1843,10 @@ export function Shell({
                     WebkitBackdropFilter: 'blur(24px)',
                     borderColor,
                     transition: 'background 0.5s ease',
-                    // Top corners match the outer card radius only in floating mode
                     borderRadius: floating ? '16px 16px 0 0' : undefined,
                 }}
             >
-                {/* Logo */}
+                {/* Logo + FIX #7: Change Project button */}
                 <div className="flex items-center gap-2.5" style={{ WebkitAppRegion: 'no-drag' }}>
                     <div className="relative flex items-center justify-center w-[16px] h-[16px] mt-0.5">
                         <img src="/sdeck.png" alt="ShadowDeck" className="absolute inset-0 w-full h-full object-contain" />
@@ -1824,6 +1856,28 @@ export function Shell({
                         Shadow<span style={{ color: accentColor }}>Deck</span>
                     </span>
                     <span className="text-xs tracking-widest ml-1" style={{ color: textDim }}>v0.1</span>
+
+                    {/* FIX #7: Dedicated Change Project button in the title bar.
+                        Lives inside the no-drag zone next to the logo so it's
+                        always reachable — no longer buried behind "Run Inquisitor". */}
+                    {onConnectProject && (
+                        <>
+                            <div className="w-px h-4 mx-1" style={{ backgroundColor: borderColor }} />
+                            <button
+                                onClick={onConnectProject}
+                                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold tracking-wider uppercase transition-all hover:scale-105"
+                                style={{
+                                    background: `color-mix(in srgb, ${accentColor} 12%, transparent)`,
+                                    border: `1px solid color-mix(in srgb, ${accentColor} 28%, transparent)`,
+                                    color: textMuted,
+                                }}
+                                title="Change active project directory"
+                            >
+                                <FolderOpen size={11} />
+                                {activeProject ? 'Change Project' : 'Open Project'}
+                            </button>
+                        </>
+                    )}
                 </div>
 
                 {/* Center: agent status pill */}
@@ -2218,11 +2272,11 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
     return () => {
       window.removeEventListener("resize", onWindowResize)
       if (sceneRef.current) {
-        cancelAnimationFrame(sceneRef.current.animationId)
-        if (container && sceneRef.current.renderer.domElement) {
+        if (sceneRef.current.animationId) cancelAnimationFrame(sceneRef.current.animationId)
+        if (container && sceneRef.current.renderer?.domElement) {
           container.removeChild(sceneRef.current.renderer.domElement)
         }
-        sceneRef.current.renderer.dispose()
+        if (sceneRef.current.renderer) sceneRef.current.renderer.dispose()
         geometry.dispose()
         material.dispose()
       }
@@ -2461,28 +2515,28 @@ import { hexToRgb } from "@/lib/utils"
  * @param {{ color?: string }} props - Hex accent color (default: "#14b8a6")
  */
 export function InterstellarShader({ color = "#14b8a6" }) {
-    const containerRef = useRef(null)
-    const sceneRef = useRef(null)
-    const colorRef = useRef(hexToRgb(color))
+  const containerRef = useRef(null)
+  const sceneRef = useRef(null)
+  const colorRef = useRef(hexToRgb(color))
 
-    useEffect(() => {
-        colorRef.current = hexToRgb(color)
-        if (sceneRef.current?.uniforms?.uAccent) {
-            sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
-        }
-    }, [color])
+  useEffect(() => {
+    colorRef.current = hexToRgb(color)
+    if (sceneRef.current?.uniforms?.uAccent) {
+      sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
+    }
+  }, [color])
 
-    useEffect(() => {
-        if (!containerRef.current) return
-        const container = containerRef.current
+  useEffect(() => {
+    if (!containerRef.current) return
+    const container = containerRef.current
 
-        const vertexShader = `
+    const vertexShader = `
       void main() {
         gl_Position = vec4( position, 1.0 );
       }
     `
 
-        const fragmentShader = `
+    const fragmentShader = `
       #define TWO_PI 6.2831853072
       #define PI 3.14159265359
 
@@ -2522,74 +2576,74 @@ export function InterstellarShader({ color = "#14b8a6" }) {
       }
     `
 
-        const camera = new THREE.Camera()
-        camera.position.z = 1
-        const scene = new THREE.Scene()
-        const geometry = new THREE.PlaneGeometry(2, 2)
+    const camera = new THREE.Camera()
+    camera.position.z = 1
+    const scene = new THREE.Scene()
+    const geometry = new THREE.PlaneGeometry(2, 2)
 
-        const rgb = colorRef.current
-        const uniforms = {
-            time: { type: "f", value: 1.0 },
-            resolution: { type: "v2", value: new THREE.Vector2() },
-            uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
+    const rgb = colorRef.current
+    const uniforms = {
+      time: { type: "f", value: 1.0 },
+      resolution: { type: "v2", value: new THREE.Vector2() },
+      uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
+    }
+
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader,
+      fragmentShader,
+    })
+
+    const mesh = new THREE.Mesh(geometry, material)
+    scene.add(mesh)
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(window.devicePixelRatio)
+    container.appendChild(renderer.domElement)
+
+    const onWindowResize = () => {
+      const width = container.clientWidth
+      const height = container.clientHeight
+      renderer.setSize(width, height)
+      uniforms.resolution.value.x = renderer.domElement.width
+      uniforms.resolution.value.y = renderer.domElement.height
+    }
+    onWindowResize()
+    window.addEventListener("resize", onWindowResize, false)
+
+    const animate = () => {
+      const animationId = requestAnimationFrame(animate)
+      uniforms.time.value += 0.05
+      const c = colorRef.current
+      uniforms.uAccent.value.set(c[0], c[1], c[2])
+      renderer.render(scene, camera)
+      if (sceneRef.current) sceneRef.current.animationId = animationId
+    }
+
+    sceneRef.current = { camera, scene, renderer, uniforms, animationId: 0 }
+    animate()
+
+    return () => {
+      window.removeEventListener("resize", onWindowResize)
+      if (sceneRef.current) {
+        if (sceneRef.current.animationId) cancelAnimationFrame(sceneRef.current.animationId)
+        if (container && sceneRef.current.renderer?.domElement) {
+          container.removeChild(sceneRef.current.renderer.domElement)
         }
+        if (sceneRef.current.renderer) sceneRef.current.renderer.dispose()
+        geometry.dispose()
+        material.dispose()
+      }
+    }
+  }, [])
 
-        const material = new THREE.ShaderMaterial({
-            uniforms,
-            vertexShader,
-            fragmentShader,
-        })
-
-        const mesh = new THREE.Mesh(geometry, material)
-        scene.add(mesh)
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true })
-        renderer.setPixelRatio(window.devicePixelRatio)
-        container.appendChild(renderer.domElement)
-
-        const onWindowResize = () => {
-            const width = container.clientWidth
-            const height = container.clientHeight
-            renderer.setSize(width, height)
-            uniforms.resolution.value.x = renderer.domElement.width
-            uniforms.resolution.value.y = renderer.domElement.height
-        }
-        onWindowResize()
-        window.addEventListener("resize", onWindowResize, false)
-
-        const animate = () => {
-            const animationId = requestAnimationFrame(animate)
-            uniforms.time.value += 0.05
-            const c = colorRef.current
-            uniforms.uAccent.value.set(c[0], c[1], c[2])
-            renderer.render(scene, camera)
-            if (sceneRef.current) sceneRef.current.animationId = animationId
-        }
-
-        sceneRef.current = { camera, scene, renderer, uniforms, animationId: 0 }
-        animate()
-
-        return () => {
-            window.removeEventListener("resize", onWindowResize)
-            if (sceneRef.current) {
-                cancelAnimationFrame(sceneRef.current.animationId)
-                if (container && sceneRef.current.renderer.domElement) {
-                    container.removeChild(sceneRef.current.renderer.domElement)
-                }
-                sceneRef.current.renderer.dispose()
-                geometry.dispose()
-                material.dispose()
-            }
-        }
-    }, [])
-
-    return (
-        <div
-            ref={containerRef}
-            className="w-full h-screen"
-            style={{ background: "#000", overflow: "hidden" }}
-        />
-    )
+  return (
+    <div
+      ref={containerRef}
+      className="w-full h-screen"
+      style={{ background: "#000", overflow: "hidden" }}
+    />
+  )
 }
 </file>
 
@@ -2771,7 +2825,15 @@ export default SkyBackground;
 // ═══════════════════════════════════════════════════════════════════════════
 //  ShadowDeck — Command Center  (v4: Surgical Strike Edition)
 //
-//  REPLACES: ChatConsole.jsx
+//  FIXES APPLIED:
+//    #1 — Export Report button: appears after Inquisitor scan completes,
+//         triggers a browser JSON download of the full results array.
+//    #3 — History save: fires POST /store/history in onComplete callback.
+//    #4 — Herald regex armor: strips conversational filler from qwen3.5:9b
+//         output using a strict Conventional Commits regex.
+//    #6 — Per-file status updates: onFileComplete fires immediately when
+//         each file resolves, updating its icon without waiting for the
+//         full queue to finish.
 //
 //  LAYOUT:
 //    ┌─────────────────────────────────────────────────────┐
@@ -2791,7 +2853,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     Bug, ScrollText, Rocket, FolderOpen,
     X, Loader2, CheckCircle2, AlertCircle,
-    ChevronRight, Square
+    ChevronRight, Square, Download
 } from 'lucide-react';
 import { TerminalLog } from '../arsenal/TerminalLog';
 import { useChatEngine } from '../../hooks/useChatEngine';
@@ -2800,6 +2862,14 @@ import { AGENT_TYPES } from '../../agents/prompts';
 import { cn } from '../../lib/utils';
 
 const BRIDGE = 'http://localhost:9090';
+
+// ── FIX #4: Conventional Commits regex ────────────────────────────────────────
+// qwen3.5:9b (Herald's model) is an instruct model that can't help prepending
+// "Here is the commit message:" before the actual output. This regex cuts through
+// all conversational noise and extracts only the valid commit string.
+// Matches: type(scope): message  OR  type!: breaking change message
+const CONVENTIONAL_COMMIT_REGEX =
+    /^(feat|fix|chore|docs|style|refactor|test|perf|ci|build|revert)(\([^)]+\))?!?:\s+.+$/m;
 
 // ── Fetch the project file tree from the bridge ───────────────────────────────
 async function fetchProjectTree(projectRoot) {
@@ -2819,6 +2889,34 @@ async function fetchProjectTree(projectRoot) {
     } catch {
         return [];
     }
+}
+
+// ── FIX #1: Trigger a browser JSON download ───────────────────────────────────
+function downloadReport(results, projectRoot) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const projectName = projectRoot
+        ? projectRoot.replace(/\\/g, '/').split('/').filter(Boolean).pop()
+        : 'project';
+
+    const report = {
+        generated: new Date().toISOString(),
+        project: projectRoot || 'unknown',
+        summary: {
+            total: results.length,
+            clean: results.filter(r => r.status === 'CLEAN').length,
+            dirty: results.filter(r => r.status === 'DIRTY').length,
+            skipped: results.filter(r => !['CLEAN', 'DIRTY'].includes(r.status)).length,
+        },
+        files: results,
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `shadowdeck-report-${projectName}-${timestamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2854,8 +2952,8 @@ function TriggerButton({ icon: Icon, label, color, onClick, disabled, isActive }
 //  Sub-component: TargetItem (left panel file row)
 // ─────────────────────────────────────────────────────────────────────────────
 function TargetItem({ filePath, status, isActive }) {
-    const filename = filePath.split(/[\\/]/).pop();
-    const dirpath = filePath.replace(/[\\/][^\\/]+$/, '');
+    const filename = filePath.split(/[\\\/]/).pop();
+    const dirpath = filePath.replace(/[\\\/][^\\\/]+$/, '');
 
     const statusIcon = {
         pending: <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0" />,
@@ -2864,6 +2962,7 @@ function TargetItem({ filePath, status, isActive }) {
         DIRTY: <AlertCircle size={11} className="text-red-400 shrink-0" />,
         SKIPPED: <span className="w-1.5 h-1.5 rounded-full bg-zinc-700 shrink-0" />,
         REJECTED: <span className="w-1.5 h-1.5 rounded-full bg-zinc-700 shrink-0" />,
+        PARSE_ERROR: <span className="w-1.5 h-1.5 rounded-full bg-amber-700 shrink-0" />,
     }[status] || <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0" />;
 
     return (
@@ -2926,6 +3025,10 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
     const [activeFile, setActiveFile] = useState(null);
     /** Commit message output from Herald */
     const [commitMessage, setCommitMessage] = useState('');
+    /** FIX #1: Full results array from the last completed Inquisitor scan */
+    const [completedResults, setCompletedResults] = useState(null);
+    /** Track the project root used for the last scan (for the report filename) */
+    const lastScannedRootRef = useRef(null);
 
     const queueEngineRef = useRef(null);
 
@@ -2939,6 +3042,7 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
                 const filePath = payload.file;
                 setQueue([filePath]);
                 setFileStatuses({ [filePath]: 'pending' });
+                setCompletedResults(null);
                 dispatch(AGENT_TYPES.INQUISITOR, {
                     filePath,
                     content: payload.code || '',
@@ -2947,7 +3051,11 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         };
 
         ipcRenderer.on('ide-trigger', handleIdeTrigger);
-        return () => ipcRenderer.removeListener('ide-trigger', handleIdeTrigger);
+        return () => {
+            if (ipcRenderer?.removeListener) {
+                ipcRenderer.removeListener('ide-trigger', handleIdeTrigger);
+            }
+        };
     }, [dispatch]);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2958,9 +3066,6 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
     const handleRunInquisitor = useCallback(async () => {
         if (isRunning) return;
 
-        // ── Ask Electron for a directory picker ─────────────────────────────────
-        // If we're in Electron, use ipcRenderer to trigger a native dialog.
-        // We fall back to the connected projectRoot if available.
         let targetRoot = projectRoot;
 
         if (window.require) {
@@ -2978,12 +3083,11 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path: targetRoot }),
-                }).catch(() => { });
+                }).catch((err) => { console.error('Project connect failed', err); });
 
-            } catch {
-                // Not in Electron or dialog not wired — fall through to projectRoot
+            } catch (err) {
                 if (!targetRoot) {
-                    pushLog('ERROR', '[INQUISITOR] No project connected and no directory picker available.');
+                    pushLog('ERROR', `[INQUISITOR] Directory picker failed: ${err.message}`);
                     return;
                 }
             }
@@ -2998,6 +3102,8 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         setQueue([]);
         setFileStatuses({});
         setActiveFile(null);
+        setCompletedResults(null); // FIX #1: clear previous report
+        lastScannedRootRef.current = targetRoot;
 
         pushLog('INFO', `[INQUISITOR] Fetching file tree from: ${targetRoot}`);
         const files = await fetchProjectTree(targetRoot);
@@ -3016,15 +3122,48 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
             projectRoot: targetRoot,
             dispatch,
             pushLog,
+
             onProgress: (current, total, filePath) => {
+                // Mark the file as 'running' when it starts
                 setActiveFile(filePath);
                 setFileStatuses(prev => ({ ...prev, [filePath]: 'running' }));
             },
+
+            // FIX #6: Update each file's icon the instant it resolves —
+            // no more spinning loaders on files that are already done.
+            onFileComplete: (filePath, status) => {
+                setActiveFile(prev => (prev === filePath ? null : prev));
+                setFileStatuses(prev => ({ ...prev, [filePath]: status }));
+            },
+
             onComplete: (results) => {
+                // onFileComplete has already updated individual statuses,
+                // but we do a final bulk-set here as a consistency guarantee.
                 setActiveFile(null);
                 setFileStatuses(
                     Object.fromEntries(results.map(r => [r.filePath, r.status]))
                 );
+
+                // FIX #1: Store results so the Export Report button can appear
+                setCompletedResults(results);
+
+                // FIX #3: Persist the scan to the history vault in %APPDATA%
+                const clean = results.filter(r => r.status === 'CLEAN').length;
+                const dirty = results.filter(r => r.status === 'DIRTY').length;
+                fetch(`${BRIDGE}/store/history`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: `inquisitor-${Date.now()}`,
+                        type: 'ANALYSIS',
+                        message: `Inquisitor scan: ${results.length} files — ${dirty} DIRTY · ${clean} CLEAN`,
+                        timestamp: new Date().toISOString(),
+                        projectRoot: targetRoot,
+                        data: results,
+                    }),
+                }).catch(() => {
+                    // Non-fatal — history save is best-effort
+                });
             },
         });
 
@@ -3047,6 +3186,7 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         clearLogs();
         setQueue(['package.json']);
         setCommitMessage('');
+        setCompletedResults(null);
         await dispatch(AGENT_TYPES.LAWYER, {});
         setQueue([]);
     }, [isRunning, projectRoot, isConnected, dispatch, pushLog, clearLogs]);
@@ -3065,13 +3205,24 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         clearLogs();
         setQueue(['git diff']);
         setCommitMessage('');
+        setCompletedResults(null);
 
         const result = await dispatch(AGENT_TYPES.HERALD, {});
 
         if (result) {
-            // Extract first non-empty line as the primary commit string
-            const firstLine = result.split('\n').find(l => l.trim());
-            if (firstLine) setCommitMessage(firstLine.trim());
+            // FIX #4: qwen3.5:9b is an instruct model and will prefix its output
+            // with conversational filler ("Here is the commit message:", etc.).
+            // We armour the extraction with a strict Conventional Commits regex
+            // that ignores every line that doesn't match the required format.
+            // Only if no valid commit line is found do we fall back to the first
+            // non-empty line (which handles edge-case models that get it right).
+            const match = result.match(CONVENTIONAL_COMMIT_REGEX);
+            if (match) {
+                setCommitMessage(match[0].trim());
+            } else {
+                const firstLine = result.split('\n').find(l => l.trim());
+                if (firstLine) setCommitMessage(firstLine.trim());
+            }
         }
         setQueue([]);
     }, [isRunning, projectRoot, isConnected, dispatch, pushLog, clearLogs]);
@@ -3092,6 +3243,8 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
     //  Render
     // ─────────────────────────────────────────────────────────────────────────
     const anyTaskActive = isRunning;
+    // FIX #1: Show export button only after a scan finishes with results
+    const showExportButton = !anyTaskActive && completedResults && completedResults.length > 0;
 
     return (
         <div className="flex flex-col h-full w-full bg-black/30 rounded-xl overflow-hidden">
@@ -3115,7 +3268,7 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
                 <div className="flex-1 h-px bg-white/[0.05]" />
 
                 {/* ── Trigger Buttons ──────────────────────────────────────────── */}
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                     <TriggerButton
                         icon={Bug}
                         label="Run Inquisitor"
@@ -3183,10 +3336,38 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
                         )}
                     </AnimatePresence>
 
+                    {/* ── FIX #1: Export Report button ──────────────────────────── */}
+                    {/* Appears only after a scan completes. Downloads a timestamped  */}
+                    {/* JSON file with the full results array.                        */}
+                    <AnimatePresence>
+                        {showExportButton && (
+                            <motion.button
+                                key="export"
+                                initial={{ opacity: 0, scale: 0.8 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.8 }}
+                                onClick={() => downloadReport(completedResults, lastScannedRootRef.current)}
+                                className="flex items-center gap-1.5 px-3 py-2.5 rounded-lg
+                           bg-teal-950/40 border border-teal-500/30 text-teal-400
+                           text-sm font-semibold hover:bg-teal-950/60 transition-colors"
+                                title="Download full Inquisitor report as JSON"
+                            >
+                                <Download size={11} className="shrink-0" />
+                                <span>Export Report</span>
+                            </motion.button>
+                        )}
+                    </AnimatePresence>
+
                     {/* ── Clear logs button ─────────────────────────────────────── */}
                     {!anyTaskActive && logs.length > 0 && (
                         <button
-                            onClick={() => { clearLogs(); setQueue([]); setCommitMessage(''); setFileStatuses({}); }}
+                            onClick={() => {
+                                clearLogs();
+                                setQueue([]);
+                                setCommitMessage('');
+                                setFileStatuses({});
+                                setCompletedResults(null);
+                            }}
                             className="p-2 rounded-lg text-zinc-600 hover:text-zinc-400 hover:bg-white/[0.04]
                          transition-colors"
                             title="Clear logs"
@@ -3304,10 +3485,12 @@ export default CommandCenter;
 // ═══════════════════════════════════════════════════════════════════════════
 //  THE LABORATORY — Agent Prompt Editor
 //
-//  Displays every agent's system prompt in an editable textarea.
-//  Overrides are saved to the bridge config store under `customPrompts`.
-//  The constructPrompt() function in prompts.js checks for overrides first
-//  (see integration note at bottom).
+//  FIX #5: Phase 1 gutted prompts.js down to 3 agents (Inquisitor, Herald,
+//  Lawyer). This file previously tried to import and render 9 agents —
+//  the missing exports caused silent crashes. Fixed by:
+//    1. Removing all imports for non-existent agent systems.
+//    2. Updating AGENT_META to only list the 3 surviving agents.
+//    3. Updating DEFAULT_PROMPTS to only map those 3 keys.
 //
 //  Layout:
 //    ┌─────────────────────────────────────────────────────┐
@@ -3324,38 +3507,49 @@ import {
     AlertTriangle, CheckCircle2, Info, ChevronRight,
 } from 'lucide-react';
 import {
-    AGENT_TYPES, AGENT_DESCRIPTIONS,
-    INQUISITOR_SYSTEM, ARTIST_SYSTEM, GHOST_SYSTEM,
-    LAWYER_SYSTEM, SENTINEL_SYSTEM, WRAITH_SYSTEM,
-    ARCHITECT_SYSTEM, SCRIBE_SYSTEM, HERALD_SYSTEM,
+    AGENT_TYPES,
+    AGENT_DESCRIPTIONS,
+    INQUISITOR_SYSTEM,
+    HERALD_SYSTEM,
+    LAWYER_SYSTEM,
 } from '../../agents/prompts';
 
 const BRIDGE = 'http://localhost:9090';
 
 // ── Default prompts indexed by agent key ─────────────────────────────────────
+// FIX #5: Only map the 3 agents that actually exist in prompts.js.
+// The old DEFAULT_PROMPTS had 9 entries pointing to undefined exports.
 const DEFAULT_PROMPTS = {
     [AGENT_TYPES.INQUISITOR]: INQUISITOR_SYSTEM,
-    [AGENT_TYPES.ARTIST]: ARTIST_SYSTEM,
-    [AGENT_TYPES.GHOST]: GHOST_SYSTEM,
-    [AGENT_TYPES.LAWYER]: LAWYER_SYSTEM,
-    [AGENT_TYPES.SENTINEL]: SENTINEL_SYSTEM,
-    [AGENT_TYPES.WRAITH]: WRAITH_SYSTEM,
-    [AGENT_TYPES.ARCHITECT]: ARCHITECT_SYSTEM,
-    [AGENT_TYPES.SCRIBE]: SCRIBE_SYSTEM,
     [AGENT_TYPES.HERALD]: HERALD_SYSTEM,
+    [AGENT_TYPES.LAWYER]: LAWYER_SYSTEM,
 };
 
-// Agent display metadata (mirrors ChatConsole)
+// FIX #5: Trimmed from 9 agents to 3. The old array referenced AGENT_TYPES
+// keys that no longer exist (WRAITH, ARCHITECT, ARTIST, GHOST, SENTINEL, SCRIBE),
+// causing the UI to map over undefined properties and crash silently.
 const AGENT_META = [
-    { key: AGENT_TYPES.INQUISITOR, label: 'Inquisitor', icon: '🔎', color: '#f97316', model: 'deepseek-r1:14b' },
-    { key: AGENT_TYPES.WRAITH, label: 'Wraith', icon: '☠️', color: '#a855f7', model: 'deepseek-r1:14b' },
-    { key: AGENT_TYPES.ARCHITECT, label: 'Architect', icon: '🏗️', color: '#3b82f6', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.ARTIST, label: 'Artist', icon: '🎨', color: '#ec4899', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.GHOST, label: 'Ghost', icon: '👻', color: '#10b981', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.SENTINEL, label: 'Sentinel', icon: '🛡️', color: '#06b6d4', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.LAWYER, label: 'Lawyer', icon: '⚖️', color: '#eab308', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.SCRIBE, label: 'Scribe', icon: '📜', color: '#8b5cf6', model: 'qwen3.5:9b' },
-    { key: AGENT_TYPES.HERALD, label: 'Herald', icon: '📣', color: '#f43f5e', model: 'qwen3.5:9b' },
+    {
+        key: AGENT_TYPES.INQUISITOR,
+        label: 'Inquisitor',
+        icon: '🔎',
+        color: '#f97316',
+        model: 'deepseek-r1:14b',
+    },
+    {
+        key: AGENT_TYPES.HERALD,
+        label: 'Herald',
+        icon: '📣',
+        color: '#38bdf8',
+        model: 'qwen3.5:9b',
+    },
+    {
+        key: AGENT_TYPES.LAWYER,
+        label: 'Lawyer',
+        icon: '⚖️',
+        color: '#eab308',
+        model: 'qwen3.5:9b',
+    },
 ];
 
 // ── Token estimator (rough: 1 token ≈ 4 chars) ───────────────────────────────
@@ -3410,7 +3604,7 @@ export function Laboratory({
         if (config?.customPrompts) {
             setDrafts(prev => ({ ...config.customPrompts, ...prev }));
         }
-    }, []);
+    }, [config?.customPrompts]);
 
     // ── Active agent data ─────────────────────────────────────────────────────
     const activeMeta = AGENT_META.find(a => a.key === activeKey) || AGENT_META[0];
@@ -3428,6 +3622,7 @@ export function Laboratory({
     // ── Save ──────────────────────────────────────────────────────────────────
     const handleSave = useCallback(async () => {
         setSaveState('saving');
+        let timerId;
         try {
             // Merge into existing config — only store overrides that differ from default
             const overrides = {};
@@ -3436,10 +3631,10 @@ export function Laboratory({
             }
             await onConfigChange?.({ customPrompts: overrides });
             setSaveState('saved');
-            setTimeout(() => setSaveState('idle'), 2500);
+            timerId = window.setTimeout(() => setSaveState('idle'), 2500);
         } catch {
             setSaveState('error');
-            setTimeout(() => setSaveState('idle'), 3000);
+            timerId = window.setTimeout(() => setSaveState('idle'), 3000);
         }
     }, [drafts, onConfigChange]);
 
@@ -3506,7 +3701,7 @@ export function Laboratory({
                     )}
                 </div>
 
-                {/* Agent list */}
+                {/* Agent list — FIX #5: Now correctly maps only 3 agents */}
                 <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
                     {AGENT_META.map(({ key, label, icon, color }) => {
                         const isActive = key === activeKey;
@@ -3745,26 +3940,6 @@ export function Laboratory({
         </div>
     );
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  INTEGRATION NOTE — prompts.js wiring
-//
-//  To make custom prompts actually take effect, update constructPrompt()
-//  in src/agents/prompts.js to accept an optional overrides map:
-//
-//    export function constructPrompt(agent, code, overrides = {}) {
-//      const systemMap = { INQUISITOR: INQUISITOR_SYSTEM, ... };
-//      const system = overrides[agent] || systemMap[agent] || INQUISITOR_SYSTEM;
-//      ...
-//    }
-//
-//  Then in useChatEngine.js, pass config.customPrompts as the third arg:
-//
-//    const built = constructPrompt(agent, sanitized, customPrompts);
-//
-//  This keeps the defaults as fallbacks and the bridge config as the
-//  single source of truth for custom prompts.
-// ═══════════════════════════════════════════════════════════════════════════
 </file>
 
 <file path="src/components/Views/Settings.jsx">
@@ -4191,25 +4366,29 @@ async function bridgeFetchDiff(projectRoot) {
 async function streamGenerate(promptPayload, onChunk, signal) {
     const { system, user, model } = promptPayload;
 
-    const res = await fetch(`${BRIDGE}/ai/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model,
-            // STATELESS: exactly two messages — system + user. No history ever.
-            messages: [
-                { role: 'system', content: system },
-                { role: 'user', content: user },
-            ],
-            stream: true,
-            options: {
-                num_ctx: 4096,   // Conservative: one file at a time, always fits
-                temperature: 0.1,    // Deterministic for JSON-emitting agents
-                repeat_penalty: 1.05,
-            },
-        }),
-        signal,
-    });
+    let res;
+    try {
+        res = await fetch(`${BRIDGE}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model,
+                messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: user },
+                ],
+                stream: true,
+                options: {
+                    num_ctx: 8192,
+                    temperature: 0.1,
+                    repeat_penalty: 1.05,
+                },
+            }),
+            signal,
+        });
+    } catch (err) {
+        throw new Error(`Fetch failed: ${err.message}`);
+    }
 
     if (!res.ok) throw new Error(`Bridge responded ${res.status}: ${await res.text()}`);
     if (!res.body) throw new Error('Bridge returned an empty response body');
@@ -4222,6 +4401,7 @@ async function streamGenerate(promptPayload, onChunk, signal) {
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (!value) continue;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -4291,6 +4471,7 @@ export function useChatEngine({
         rafRef.current = requestAnimationFrame(() => {
             rafDirty = false;
             setStreamBuffer(streamRef.current);
+            rafRef.current = null;
         });
     }, []);
 
@@ -4530,9 +4711,10 @@ export function useChatEngine({
 
         } finally {
             // ── CRITICAL: Drop all context before the next task ──────────────
-            // Zero-out every reference to the payload so GC can reclaim the memory.
-            // This is the guarantee that File A's context never bleeds into File B.
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            if (rafRef.current) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
+            }
             setIsRunning(false);
             setActiveTask(null);
             setStreamBuffer('');
@@ -4771,11 +4953,16 @@ export function cn(...inputs) {
  * @returns {[number, number, number]}
  */
 export function hexToRgb(hex) {
+    if (!hex || typeof hex !== 'string') return [0, 0, 0];
     const h = hex.replace('#', '');
+    const cleanHex = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+    const r = parseInt(cleanHex.substring(0, 2), 16);
+    const g = parseInt(cleanHex.substring(2, 4), 16);
+    const b = parseInt(cleanHex.substring(4, 6), 16);
     return [
-        parseInt(h.substring(0, 2), 16) / 255,
-        parseInt(h.substring(2, 4), 16) / 255,
-        parseInt(h.substring(4, 6), 16) / 255,
+        (isNaN(r) ? 0 : r) / 255,
+        (isNaN(g) ? 0 : g) / 255,
+        (isNaN(b) ? 0 : b) / 255,
     ];
 }
 </file>
@@ -4867,8 +5054,10 @@ export function sanitizeContext(content, filename, agent) {
 
 // ── STRATEGY: DIFF OPTIMIZER ──────────────────────────────────
 function optimizeDiff(diff) {
-    return diff
-        .split('\n')
+    if (!diff) return '';
+    const lines = diff.split('\n');
+    if (!lines || !lines.length) return '';
+    return lines
         // Remove "index a432..b564" lines (git noise)
         .filter(line => !line.startsWith('index '))
         // Remove massive deletions (we only care about what is added/changed mostly)
@@ -4900,7 +5089,7 @@ function optimizeCode(code, stripComments = false) {
     clean = clean.replace(/d="[a-zA-Z0-9\s.,-]{50,}"/g, 'd="..."');
 
     // 2. Remove base64 images
-    clean = clean.replace(/data:image\/[^;]+;base64,[a-zA-Z0-9+/=]{50,}/g, '"[BASE64_IMAGE_REMOVED]"');
+    clean = clean.replace(/data:image\/[^;]+;base64,[a-zA-Z0-9+/=]{50,}/g, '[BASE64_IMAGE_REMOVED]');
 
     // 3. (Optional) Strip Comments for strict logic agents
     if (stripComments) {
@@ -4933,7 +5122,8 @@ function optimizeCode(code, stripComments = false) {
 //    This prevents VRAM accumulation across files on local hardware.
 //
 //  USAGE (from CommandCenter.jsx):
-//    const engine = new TaskQueueEngine({ projectRoot, dispatch, pushLog });
+//    const engine = new TaskQueueEngine({ projectRoot, dispatch, pushLog,
+//                                         onProgress, onFileComplete, onComplete });
 //    await engine.run(filePaths);
 //    engine.abort();
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4946,6 +5136,13 @@ const BRIDGE = 'http://localhost:9090';
 // Hard cap per file: 20k chars ≈ ~5k tokens.
 // A single file should never need more than this for bug-hunting.
 const MAX_FILE_CHARS = 20_000;
+
+// FIX #2: Hard rejection ceiling — files over 16k tokens are monolithic
+// nightmares that need human refactoring, not AI chunking. Attempting to
+// split them across "operators" breaks the AST and causes hallucinations.
+// 16,000 tokens × 4 chars/token = 64,000 chars.
+const MAX_TOKENS_REJECTION = 16_000;
+const REJECTION_CHAR_LIMIT = MAX_TOKENS_REJECTION * 4; // 64,000 chars
 
 /**
  * Fetch a single file from the bridge.
@@ -4976,17 +5173,22 @@ async function fetchFile(relativePath) {
 export class TaskQueueEngine {
     /**
      * @param {Object}   opts
-     * @param {string}   opts.projectRoot   — Absolute path to the active project
-     * @param {Function} opts.dispatch      — The dispatch fn from useChatEngine
-     * @param {Function} opts.pushLog       — The pushLog fn from useChatEngine
-     * @param {Function} [opts.onProgress]  — (current: number, total: number, filePath: string) => void
-     * @param {Function} [opts.onComplete]  — (results: Array) => void
+     * @param {string}   opts.projectRoot      — Absolute path to the active project
+     * @param {Function} opts.dispatch         — The dispatch fn from useChatEngine
+     * @param {Function} opts.pushLog          — The pushLog fn from useChatEngine
+     * @param {Function} [opts.onProgress]     — (current: number, total: number, filePath: string) => void
+     * @param {Function} [opts.onFileComplete] — (filePath: string, status: string, issues: Array) => void
+     *                                           FIX #6: Fires immediately when each file finishes so the
+     *                                           UI can update that file's icon without waiting for the
+     *                                           full queue to complete.
+     * @param {Function} [opts.onComplete]     — (results: Array) => void
      */
-    constructor({ projectRoot, dispatch, pushLog, onProgress = null, onComplete = null }) {
+    constructor({ projectRoot, dispatch, pushLog, onProgress = null, onFileComplete = null, onComplete = null }) {
         this.projectRoot = projectRoot;
         this.dispatch = dispatch;
         this.pushLog = pushLog;
         this.onProgress = onProgress;
+        this.onFileComplete = onFileComplete; // FIX #6
         this.onComplete = onComplete;
 
         this._aborted = false;
@@ -5039,30 +5241,53 @@ export class TaskQueueEngine {
                 rawContent = await fetchFile(filePath);
             } catch (fetchErr) {
                 this.pushLog('ERROR', `[QUEUE] Failed to fetch ${filePath}: ${fetchErr.message}`);
-                this._results.push({ filePath, status: 'FETCH_ERROR', issues: [] });
+                const result = { filePath, status: 'FETCH_ERROR', issues: [] };
+                this._results.push(result);
+                this.onFileComplete?.(filePath, result.status, result.issues); // FIX #6
                 continue; // skip to next file — don't stop the queue
             }
 
             if (!rawContent) {
                 this.pushLog('WARNING', `[QUEUE] Skipping ${filePath} — file not found or empty.`);
-                this._results.push({ filePath, status: 'SKIPPED', issues: [] });
+                const result = { filePath, status: 'SKIPPED', issues: [] };
+                this._results.push(result);
+                this.onFileComplete?.(filePath, result.status, result.issues); // FIX #6
+                continue;
+            }
+
+            // ── FIX #2: Hard rejection for monolithic files ────────────────────
+            // Files over 16k tokens are a structural problem. Chopping them into
+            // "operator chunks" would slice useEffect hooks and class definitions
+            // mid-AST, causing the model to hallucinate syntax errors. Reject
+            // gracefully and ask the developer to refactor manually.
+            if (rawContent.length > REJECTION_CHAR_LIMIT) {
+                const estimatedTokens = Math.round(rawContent.length / 4).toLocaleString();
+                this.pushLog('WARNING',
+                    `[QUEUE] REJECTED ${filePath} — ~${estimatedTokens} tokens exceeds the 16k ceiling. ` +
+                    `This file is a monolith that needs human refactoring, not AI chunking.`
+                );
+                const result = { filePath, status: 'REJECTED', issues: [] };
+                this._results.push(result);
+                this.onFileComplete?.(filePath, result.status, result.issues); // FIX #6
                 continue;
             }
 
             // ── STAGE 2: Sanitize ──────────────────────────────────────────────
             // Run the ContextManager "butcher" pass to strip comments, SVG paths,
             // base64 blobs, and noise. Enforce the hard char cap.
-            let sanitized;
+            let sanitized = '';
             try {
                 const stripped = sanitizeContext(rawContent, filePath, AGENT_TYPES.INQUISITOR);
                 // Hard cap: truncate if the file is still massive after stripping
                 sanitized = stripped.length > MAX_FILE_CHARS
-                    ? stripped.slice(0, MAX_FILE_CHARS) + '\n// [FILE TRUNCATED — context cap reached]'
+                    ? stripped.slice(0, MAX_FILE_CHARS) + '\n/* [FILE TRUNCATED] */\n'
                     : stripped;
             } catch (sanitizeErr) {
                 // ContextManager throws for lockfiles, minified files, etc.
                 this.pushLog('WARNING', `[QUEUE] Skipping ${filePath} — ${sanitizeErr.message}`);
-                this._results.push({ filePath, status: 'REJECTED', issues: [] });
+                const result = { filePath, status: 'REJECTED', issues: [] };
+                this._results.push(result);
+                this.onFileComplete?.(filePath, result.status, result.issues); // FIX #6
                 continue;
             }
 
@@ -5077,7 +5302,9 @@ export class TaskQueueEngine {
                 });
             } catch (dispatchErr) {
                 this.pushLog('ERROR', `[QUEUE] Dispatch failed for ${filePath}: ${dispatchErr.message}`);
-                this._results.push({ filePath, status: 'DISPATCH_ERROR', issues: [] });
+                const result = { filePath, status: 'DISPATCH_ERROR', issues: [] };
+                this._results.push(result);
+                this.onFileComplete?.(filePath, result.status, result.issues); // FIX #6
                 // Context is dropped by the dispatch's finally block — safe to continue.
                 continue;
             }
@@ -5096,6 +5323,12 @@ export class TaskQueueEngine {
                 scanResult = { filePath, status: 'PARSE_ERROR', issues: [] };
             }
             this._results.push(scanResult);
+
+            // FIX #6: Fire the per-file completion callback immediately so the
+            // UI can flip this file's icon to CLEAN/DIRTY without waiting for
+            // the entire queue to finish. This eliminates the psychological
+            // friction of watching a spinner on a file that is already done.
+            this.onFileComplete?.(scanResult.filePath, scanResult.status, scanResult.issues);
 
             // ── STAGE 5: CONTEXT DROP ──────────────────────────────────────────
             // Explicitly null out all references to this file's data.

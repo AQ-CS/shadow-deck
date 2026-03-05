@@ -169,12 +169,12 @@ export class TaskQueueEngine {
             // ── STAGE 2: Sanitize ──────────────────────────────────────────────
             // Run the ContextManager "butcher" pass to strip comments, SVG paths,
             // base64 blobs, and noise. Enforce the hard char cap.
-            let sanitized;
+            let sanitized = '';
             try {
                 const stripped = sanitizeContext(rawContent, filePath, AGENT_TYPES.INQUISITOR);
                 // Hard cap: truncate if the file is still massive after stripping
                 sanitized = stripped.length > MAX_FILE_CHARS
-                    ? stripped.slice(0, MAX_FILE_CHARS) + '\n// [FILE TRUNCATED — context cap reached]'
+                    ? stripped.slice(0, MAX_FILE_CHARS) + '\n/* [FILE TRUNCATED] */\n'
                     : stripped;
             } catch (sanitizeErr) {
                 // ContextManager throws for lockfiles, minified files, etc.

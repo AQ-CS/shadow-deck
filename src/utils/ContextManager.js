@@ -71,8 +71,10 @@ export function sanitizeContext(content, filename, agent) {
 
 // ── STRATEGY: DIFF OPTIMIZER ──────────────────────────────────
 function optimizeDiff(diff) {
-    return diff
-        .split('\n')
+    if (!diff) return '';
+    const lines = diff.split('\n');
+    if (!lines || !lines.length) return '';
+    return lines
         // Remove "index a432..b564" lines (git noise)
         .filter(line => !line.startsWith('index '))
         // Remove massive deletions (we only care about what is added/changed mostly)
@@ -104,7 +106,7 @@ function optimizeCode(code, stripComments = false) {
     clean = clean.replace(/d="[a-zA-Z0-9\s.,-]{50,}"/g, 'd="..."');
 
     // 2. Remove base64 images
-    clean = clean.replace(/data:image\/[^;]+;base64,[a-zA-Z0-9+/=]{50,}/g, '"[BASE64_IMAGE_REMOVED]"');
+    clean = clean.replace(/data:image\/[^;]+;base64,[a-zA-Z0-9+/=]{50,}/g, '[BASE64_IMAGE_REMOVED]');
 
     // 3. (Optional) Strip Comments for strict logic agents
     if (stripComments) {

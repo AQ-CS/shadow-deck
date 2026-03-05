@@ -228,7 +228,11 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         };
 
         ipcRenderer.on('ide-trigger', handleIdeTrigger);
-        return () => ipcRenderer.removeListener('ide-trigger', handleIdeTrigger);
+        return () => {
+            if (ipcRenderer?.removeListener) {
+                ipcRenderer.removeListener('ide-trigger', handleIdeTrigger);
+            }
+        };
     }, [dispatch]);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -256,11 +260,11 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path: targetRoot }),
-                }).catch(() => { });
+                }).catch((err) => { console.error('Project connect failed', err); });
 
-            } catch {
+            } catch (err) {
                 if (!targetRoot) {
-                    pushLog('ERROR', '[INQUISITOR] No project connected and no directory picker available.');
+                    pushLog('ERROR', `[INQUISITOR] Directory picker failed: ${err.message}`);
                     return;
                 }
             }

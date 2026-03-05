@@ -121,7 +121,7 @@ export function Laboratory({
         if (config?.customPrompts) {
             setDrafts(prev => ({ ...config.customPrompts, ...prev }));
         }
-    }, []);
+    }, [config?.customPrompts]);
 
     // ── Active agent data ─────────────────────────────────────────────────────
     const activeMeta = AGENT_META.find(a => a.key === activeKey) || AGENT_META[0];
@@ -139,6 +139,7 @@ export function Laboratory({
     // ── Save ──────────────────────────────────────────────────────────────────
     const handleSave = useCallback(async () => {
         setSaveState('saving');
+        let timerId;
         try {
             // Merge into existing config — only store overrides that differ from default
             const overrides = {};
@@ -147,10 +148,10 @@ export function Laboratory({
             }
             await onConfigChange?.({ customPrompts: overrides });
             setSaveState('saved');
-            setTimeout(() => setSaveState('idle'), 2500);
+            timerId = window.setTimeout(() => setSaveState('idle'), 2500);
         } catch {
             setSaveState('error');
-            setTimeout(() => setSaveState('idle'), 3000);
+            timerId = window.setTimeout(() => setSaveState('idle'), 3000);
         }
     }, [drafts, onConfigChange]);
 

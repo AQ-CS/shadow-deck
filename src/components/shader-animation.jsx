@@ -113,11 +113,11 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
     return () => {
       window.removeEventListener("resize", onWindowResize)
       if (sceneRef.current) {
-        cancelAnimationFrame(sceneRef.current.animationId)
-        if (container && sceneRef.current.renderer.domElement) {
+        if (sceneRef.current.animationId) cancelAnimationFrame(sceneRef.current.animationId)
+        if (container && sceneRef.current.renderer?.domElement) {
           container.removeChild(sceneRef.current.renderer.domElement)
         }
-        sceneRef.current.renderer.dispose()
+        if (sceneRef.current.renderer) sceneRef.current.renderer.dispose()
         geometry.dispose()
         material.dispose()
       }

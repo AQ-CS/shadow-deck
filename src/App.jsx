@@ -64,7 +64,7 @@ export default function App() {
         apiKeys: { ...prev.apiKeys, ...stored?.apiKeys },
         ui: { ...prev.ui, ...stored?.ui },
       })))
-      .catch(() => { });
+      .catch((err) => { console.error('[STORE] Failed to load config', err); });
   }, []);
 
   // ── Config helpers ────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ export default function App() {
       fetch(`${BRIDGE}/store/config`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated),
-      }).catch(() => { });
+      }).catch((err) => { console.error('[STORE] Failed to save config', err); });
       return updated;
     });
   }, []);
@@ -110,7 +110,7 @@ export default function App() {
 
   // ── Clear history ─────────────────────────────────────────────────────────
   const handleClearHistory = useCallback(() => {
-    fetch(`${BRIDGE}/store/history`, { method: 'DELETE' }).catch(() => { });
+    fetch(`${BRIDGE}/store/history`, { method: 'DELETE' }).catch((err) => { console.error('[STORE] Failed to clear history', err); });
   }, []);
 
   // ═══════════════════════════════════════════════════════════════════════════
