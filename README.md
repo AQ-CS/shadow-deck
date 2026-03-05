@@ -1,4 +1,4 @@
-# � PROJECT ARCHIVED: ShadowDeck
+# 🛑 PROJECT ARCHIVED: ShadowDeck
 
 > **Status: Abandoned / Archived.**
 > *ShadowDeck was an experimental, local-first developer command center. As a systems engineering exercise in Electron, Node.js, and local LLM orchestration, it was a massive success. As a daily-driver productivity tool, it hit the physical limits of local hardware. Read the Architecture Review below for details.*
