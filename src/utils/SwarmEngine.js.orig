@@ -1,0 +1,792 @@
+// src/utils/SwarmEngine.js  v2.0 — SwarmOS Strategy Engine
+// ═══════════════════════════════════════════════════════════════════════════
+//  Architecture: Strategy Pattern
+//
+//  Each of the 9 agents defines its own MAP prompt (per-file scan) and
+//  REDUCE prompt (synthesis). runSwarm() picks the right strategy from
+//  SWARM_STRATEGIES via the agentType parameter. No more hardcoded modes.
+//
+//  Scopes:
+//    SCOPE_SINGLE    → [centerFile] only
+//    SCOPE_NEIGHBORS → centerFile + direct imports + directory siblings
+//    SCOPE_REPO      → entire project tree (original behaviour)
+//
+//  VRAM budget (8GB GPU):
+//    MAP    → qwen3.5:9b,      num_ctx 4096, num_predict 256   (~1.4k tokens/req)
+//    REDUCE → deepseek-r1:14b, num_ctx 8192, num_predict 1024
+//    Concurrency: 3 parallel MAP requests
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { AGENT_TYPES } from '../agents/prompts';
+
+// ── Public scope constants ────────────────────────────────────────────────────
+export const SWARM_SCOPE = {
+    SINGLE: 'single',
+    NEIGHBORS: 'neighbors',
+    REPO: 'repo',
+};
+
+const BRIDGE = 'http://localhost:9090';
+
+// ── Token budget ──────────────────────────────────────────────────────────────
+const MAP_INPUT_MAX_CHARS = 3_600;  // ≈ 900 tokens of code
+const MAP_CTX = 4096;
+const MAP_MAX_PREDICT = 256;    // Force terse bullet output
+const REDUCE_CTX = 8192;
+const REDUCE_MAX_PREDICT = 1024;
+const REDUCE_BUDGET_CHARS = 22_000; // ≈ 5.5k tokens of report content
+
+// ── Shared output rules injected into every MAP prompt ────────────────────────
+const MAP_RULES = `OUTPUT RULES (STRICT):
+- One bullet per issue: [SEVERITY] line N: description under 25 words
+- Severity: CRITICAL | WARNING | INFO
+- If the file has zero issues: output only the single word CLEAN
+- No preamble. No summary. No code blocks. Bullets only.`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SWARM_STRATEGIES
+//  Each entry: { map(filename, content) → string, reduce(reports, stats) → string }
+//  Optional: reduceModel (override the reduce model for lightweight agents)
+//            filterInfo  (drop [INFO] bullets during compression; default true)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const SWARM_STRATEGIES = {
+
+    // ── INQUISITOR — Logic & Runtime Defects ─────────────────────────────────
+    [AGENT_TYPES.INQUISITOR]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Static analysis. Hunt for runtime defects only.
+Focus: null/undefined dereferences, race conditions, memory leaks (listeners never
+removed, intervals never cleared), infinite loops / infinite re-renders, uncaught
+promise rejections, off-by-one errors, dangerous type coercion (== vs ===).
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE INQUISITOR — a Senior Systems Programmer. A swarm scanned a codebase for runtime defects.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+PER-FILE REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Synthesize into a defect brief using EXACTLY these headers:
+## Executive Summary
+## Critical Defects
+## Warnings
+## Systemic Patterns
+## Remediation Plan
+
+Reference file paths and line numbers. Sort by severity. Be precise.`,
+    },
+
+    // ── WRAITH — Security & Vulnerabilities ──────────────────────────────────
+    [AGENT_TYPES.WRAITH]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Security audit. Find exploitable vulnerabilities as a pen tester would.
+Focus: injection (SQL/NoSQL/command), broken auth, XSS, CSRF, insecure
+deserialization, hardcoded secrets/tokens, path traversal, prototype pollution,
+unsafe eval/exec, missing rate limiting on sensitive routes.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE WRAITH — an Offensive Security Engineer. A swarm scanned a codebase for vulnerabilities.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+VULNERABILITY REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Penetration Test Report using EXACTLY these headers:
+## Threat Summary
+## Critical Vulnerabilities (CVSS ≥ 7)
+## Medium Vulnerabilities (CVSS 4–6)
+## Attack Vectors & Chains
+## Hardening Recommendations
+
+Assess exploitability. Prioritize by blast radius.`,
+    },
+
+    // ── ARCHITECT — Structure & Coupling ─────────────────────────────────────
+    [AGENT_TYPES.ARCHITECT]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Architectural analysis. Identify structural violations only.
+Focus: god objects (>300 lines, multiple responsibilities), tight coupling (direct
+cross-module imports bypassing abstractions), prop drilling beyond 3 levels, circular
+dependencies, violations of SRP, dead exports, missing abstractions for repeat patterns.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE ARCHITECT — a Principal Engineer obsessed with Clean Code. A swarm audited for structural violations.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+STRUCTURAL REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Refactoring Roadmap using EXACTLY these headers:
+## Architecture Overview
+## High-Priority Decoupling Targets
+## God Objects / Bloated Modules
+## Recommended Abstractions
+## Phased Refactoring Plan
+
+Focus on ROI — biggest structural gains for least churn.`,
+    },
+
+    // ── ARTIST — UI/UX & Accessibility ───────────────────────────────────────
+    [AGENT_TYPES.ARTIST]: {
+        filterInfo: false, // a11y INFO violations matter — keep them
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: UI/UX and accessibility audit. Find visual and a11y issues.
+Focus: hardcoded hex/rgb values (should be design tokens), magic spacing numbers,
+RTL violations (text-align:left → use logical properties), touch targets under 44px,
+missing alt text, missing aria labels on interactive elements, type sizes not on
+a consistent scale.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE ARTIST — a Design Systems Lead. A swarm audited a UI codebase for consistency and accessibility.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+UI/A11Y REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Design System Audit using EXACTLY these headers:
+## Design System Health
+## Accessibility Violations
+## Inconsistent Patterns (colors, spacing, typography)
+## RTL / Localization Gaps
+## Recommended Token System
+
+Systemic patterns (issues in many files) = missing design tokens.`,
+        reduceModel: 'qwen3.5:9b',
+    },
+
+    // ── GHOST — Test Coverage Gaps ───────────────────────────────────────────
+    [AGENT_TYPES.GHOST]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Test coverage analysis. Find untested logic paths.
+Focus: exported functions/components with no corresponding test file, complex
+conditionals (if/else chains, nested ternaries >2) lacking test cases, async
+operations without error-path tests, data transforms not tested on empty/null/zero
+inputs, event handlers with no interaction tests.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE GHOST — a QA Automation Engineer. A swarm analyzed a codebase for test coverage gaps.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+COVERAGE GAP REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Test Coverage Audit using EXACTLY these headers:
+## Coverage Summary
+## Critical Untested Paths
+## Missing Unit Tests
+## Missing Integration Tests
+## Suggested Test Priorities
+
+Order by risk: untested auth > untested transforms > untested UI.`,
+        reduceModel: 'qwen3.5:9b',
+    },
+
+    // ── SENTINEL — Code Review ────────────────────────────────────────────────
+    [AGENT_TYPES.SENTINEL]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Code review. Identify correctness and maintainability issues.
+Focus: misleading names (name ≠ behaviour), missing error handling (bare async
+with no try/catch, unhandled rejections), functions with >4 params (use options
+object), boolean parameters (use enums), nesting >3 levels (extract helpers),
+magic numbers without named constants, inconsistent patterns visible across files.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE SENTINEL — a Senior Code Reviewer. A swarm reviewed a codebase for correctness and maintainability.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+CODE REVIEW REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Code Review Summary using EXACTLY these headers:
+## Overall Code Health Score (1–10 with rationale)
+## Correctness Issues
+## Maintainability Concerns
+## Style Inconsistencies
+## Top 5 Action Items
+
+Be specific about files and patterns that need the most attention.`,
+        // Sentinel gets deepseek-r1 for deep review logic — set via AGENT_MODELS,
+        // but we DON'T set reduceModel here so it defaults to deepseek-r1:14b.
+    },
+
+    // ── LAWYER — License & Compliance ────────────────────────────────────────
+    [AGENT_TYPES.LAWYER]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: License and compliance audit for a CLOSED-SOURCE COMMERCIAL application.
+Focus: imports of GPL/AGPL/LGPL libraries (HIGH_RISK for commercial use), copyleft
+libraries requiring source disclosure, missing license headers, deprecated or
+vulnerable API usage, hardcoded PII or credentials. For package.json, classify
+every dependency by license risk tier.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE LAWYER — an IP Compliance Officer. A swarm audited a codebase for legal and compliance risk.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+⚠️ AUTOMATED AUDIT — NOT LEGAL ADVICE. Consult qualified counsel before acting.
+
+COMPLIANCE REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Compliance Report using EXACTLY these headers:
+## Compliance Verdict (CLEAR / REVIEW_REQUIRED / BLOCKED)
+## High-Risk Findings (GPL/AGPL contamination)
+## Medium-Risk Findings (conditional licenses)
+## Credential / PII Exposure
+## Remediation Steps`,
+        reduceModel: 'qwen3.5:9b',
+    },
+
+    // ── SCRIBE — Documentation Gaps ──────────────────────────────────────────
+    [AGENT_TYPES.SCRIBE]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Documentation audit. Find under-documented or undocumented code.
+Focus: exported functions/components missing JSDoc/TSDoc, complex algorithms with
+no inline explanation, non-obvious side effects not documented, props/params missing
+type annotations, public APIs lacking usage examples, README-worthy modules with
+no module-level comment.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE SCRIBE — a Technical Writer. A swarm audited a codebase for documentation gaps.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+DOC GAP REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Documentation Audit using EXACTLY these headers:
+## Documentation Health
+## Critical Gaps (public APIs with no docs)
+## Complex Logic Needing Comments
+## Suggested JSDoc Templates
+## Documentation Priority List
+
+Focus on gaps that would most confuse a new contributor.`,
+        reduceModel: 'qwen3.5:9b',
+    },
+
+    // ── HERALD — Release Readiness ────────────────────────────────────────────
+    [AGENT_TYPES.HERALD]: {
+        map: (filename, content) =>
+            `FILE: ${filename}
+${'─'.repeat(60)}
+${content}
+${'─'.repeat(60)}
+TASK: Release readiness check. Find pre-commit cleanup issues.
+Focus: console.log / debugger statements left in production code, commented-out
+code blocks that should be deleted, TODO/FIXME/HACK/XXX without ticket references,
+skipped tests (it.skip / xit / xdescribe), hardcoded localhost/dev URLs or test
+credentials.
+${MAP_RULES}`,
+
+        reduce: (reports, stats) =>
+            `You are THE HERALD — a Release Engineer. A swarm analyzed a codebase for commit/release readiness.
+STATS: ${stats.total} files | ${stats.clean} clean | ${stats.dirty} flagged | ${stats.errors} errors
+
+READINESS REPORTS:
+${'═'.repeat(60)}
+${reports}
+${'═'.repeat(60)}
+
+Produce a Release Readiness Report using EXACTLY these headers:
+## Release Verdict (READY / NEEDS_CLEANUP / BLOCKED)
+## Debug Artifacts (console.log, debugger)
+## Dead Code (commented-out blocks, unused exports)
+## Unresolved TODOs / FIXMEs
+## Suggested Conventional Commit Message for this changeset`,
+        reduceModel: 'qwen3.5:9b',
+    },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  INTERNAL UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Bounded concurrency pool ──────────────────────────────────────────────────
+async function* asyncPool(concurrency, items, fn) {
+    const executing = new Set();
+    for (const item of items) {
+        const p = Promise.resolve().then(() => fn(item)).catch(e => ({ _poolError: e }));
+        executing.add(p);
+        const cleanup = () => executing.delete(p);
+        p.then(cleanup, cleanup);
+        if (executing.size >= concurrency) await Promise.race(executing);
+        yield p;
+    }
+    while (executing.size > 0) await Promise.race(executing);
+}
+
+// ── File fetcher ──────────────────────────────────────────────────────────────
+async function fetchFileContent(relativePath) {
+    try {
+        const res = await fetch(`${BRIDGE}/project/file?rel=${encodeURIComponent(relativePath)}`, { cache: 'no-store' });
+        const data = await res.json();
+        if (data.error || !data.content) return null;
+        return data.content.length > MAP_INPUT_MAX_CHARS
+            ? data.content.slice(0, MAP_INPUT_MAX_CHARS) + '\n// [TRUNCATED]'
+            : data.content;
+    } catch { return null; }
+}
+
+// ── Single-file MAP ───────────────────────────────────────────────────────────
+async function mapFile(filepath, mapPromptFn, model, signal) {
+    const content = await fetchFileContent(filepath);
+    if (content === null) return { file: filepath, status: 'SKIP', report: null, tokens: 0 };
+
+    const prompt = mapPromptFn(filepath, content);
+
+    try {
+        const res = await fetch(`${BRIDGE}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model,
+                prompt,
+                stream: false,
+                options: { num_ctx: MAP_CTX, temperature: 0.05, num_predict: MAP_MAX_PREDICT, top_p: 0.9, repeat_penalty: 1.1 },
+            }),
+            signal,
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            return { file: filepath, status: 'ERROR', report: `HTTP ${res.status}: ${err.slice(0, 120)}`, tokens: 0 };
+        }
+
+        const data = await res.json();
+        const raw = (data.response || '').trim();
+        const clean = /^clean$/i.test(raw) || raw.length === 0;
+
+        return { file: filepath, status: clean ? 'CLEAN' : 'DIRTY', report: clean ? null : raw, tokens: Math.ceil(prompt.length / 4) };
+
+    } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        return { file: filepath, status: 'ERROR', report: `Scan failed: ${err.message}`, tokens: 0 };
+    }
+}
+
+// ── Raw Text MAP ──────────────────────────────────────────────────────────────
+async function mapRawChunk(chunkContent, chunkIndex, mapPromptFn, model, signal) {
+    const virtualFilename = `chunk_${chunkIndex + 1}.txt`;
+    const prompt = mapPromptFn(virtualFilename, chunkContent);
+
+    try {
+        const res = await fetch(`${BRIDGE}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model,
+                prompt,
+                stream: false,
+                options: { num_ctx: MAP_CTX, temperature: 0.05, num_predict: MAP_MAX_PREDICT, top_p: 0.9, repeat_penalty: 1.1 },
+            }),
+            signal,
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            return { file: virtualFilename, status: 'ERROR', report: `HTTP ${res.status}: ${err.slice(0, 120)}`, tokens: 0 };
+        }
+
+        const data = await res.json();
+        const raw = (data.response || '').trim();
+        const clean = /^clean$/i.test(raw) || raw.length === 0;
+
+        return { file: virtualFilename, status: clean ? 'CLEAN' : 'DIRTY', report: clean ? null : raw, tokens: Math.ceil(prompt.length / 4) };
+
+    } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        return { file: virtualFilename, status: 'ERROR', report: `Scan failed: ${err.message}`, tokens: 0 };
+    }
+}
+
+// ── Report compression ────────────────────────────────────────────────────────
+function compressReports(dirtyResults, filterInfo = true) {
+    if (!dirtyResults.length) return '_No issues found._';
+
+    // CRITICAL-first so most important issues survive the budget cut
+    const sorted = [...dirtyResults].sort((a, b) =>
+        ((b.report || '').includes('[CRITICAL]') ? 1 : -1) - ((a.report || '').includes('[CRITICAL]') ? 1 : -1)
+    );
+
+    let output = '', omitted = 0;
+    for (const { file, report } of sorted) {
+        if (!report) continue;
+        const lines = report.split('\n')
+            .filter(l => l.trim())
+            .filter(l => filterInfo ? !/^\[INFO\]/i.test(l.trim()) : true)
+            .slice(0, 8);
+        if (!lines.length) continue;
+        const entry = `### ${file}\n${lines.join('\n')}\n\n`;
+        if (output.length + entry.length > REDUCE_BUDGET_CHARS) { omitted++; continue; }
+        output += entry;
+    }
+    if (omitted) output += `\n> ⚠️ ${omitted} additional files omitted to stay within context budget.\n`;
+    return output;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PUBLIC API: runSwarm
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * @param {Object}     opts
+ * @param {string[]}   [opts.files]         Relative paths to scan
+ * @param {string}     [opts.rawText]       Raw text to chunk and scan (used instead of files)
+ * @param {string}     [opts.agentType]     Which agent drives the strategy (default: INQUISITOR)
+ * @param {string}     [opts.mapModel]      Override map model
+ * @param {string}     [opts.reduceModel]   Override reduce model
+ * @param {number}     [opts.concurrency]   Parallel map requests (default: 3)
+ * @param {Function}   [opts.onMapProgress] ({file,status,report,completed,total}) => void
+ * @param {Function}   [opts.onPhaseChange] ('map'|'reduce'|'done'|'error') => void
+ * @param {Function}   [opts.onReduceStream] (chunk: string) => void
+ * @param {Function}   [opts.onLog]         ({ts,source,level,message}) => void — structured system events
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<{mapResults, summary, stats}>}
+ */
+export async function runSwarm({
+    files,
+    rawText,
+    agentType = AGENT_TYPES.INQUISITOR,
+    mapModel = 'qwen3.5:9b',
+    reduceModel,
+    concurrency = 3,
+    onMapProgress,
+    onPhaseChange,
+    onReduceStream,
+    onLog,
+    signal,
+} = {}) {
+    if (!files?.length && !rawText) throw new Error('SwarmEngine: no files or rawText provided');
+
+    const strategy = SWARM_STRATEGIES[agentType] ?? SWARM_STRATEGIES[AGENT_TYPES.INQUISITOR];
+    const finalReduceModel = reduceModel ?? strategy.reduceModel ?? 'deepseek-r1:14b';
+    const filterInfo = strategy.filterInfo !== false;
+
+    // Helper: emit a structured log event
+    const log = (source, level, message) => {
+        onLog?.({ ts: Date.now(), source, level, message });
+    };
+
+    const isRawMode = !!rawText;
+    let mapItems = [];
+
+    if (isRawMode) {
+        // Chunk raw text into safe context sizes
+        for (let i = 0; i < rawText.length; i += MAP_INPUT_MAX_CHARS) {
+            mapItems.push(rawText.substring(i, i + MAP_INPUT_MAX_CHARS));
+        }
+        log('SWARM', 'info', `Chunked raw input into ${mapItems.length} segments · agent: ${agentType} · map model: ${mapModel}`);
+    } else {
+        mapItems = files;
+        log('SWARM', 'info', `Discovered ${mapItems.length} code files · agent: ${agentType} · map model: ${mapModel}`);
+    }
+
+    // ── MAP ───────────────────────────────────────────────────────────────────
+    onPhaseChange?.('map');
+    const mapResults = [];
+    let completed = 0;
+    const total = mapItems.length;
+
+    const pool = asyncPool(concurrency, mapItems, async (item) => {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+        // Execute map logic based on mode
+        let result;
+        let displayName;
+        if (isRawMode) {
+            const index = mapItems.indexOf(item);
+            result = await mapRawChunk(item, index, strategy.map, mapModel, signal);
+            displayName = result.file;
+        } else {
+            result = await mapFile(item, strategy.map, mapModel, signal);
+            displayName = result.file;
+        }
+
+        completed++;
+        mapResults.push(result);
+        onMapProgress?.({ ...result, completed, total });
+
+        // Emit per-file log
+        if (result.status === 'CLEAN') {
+            log('MAP', 'dim', `${displayName} → CLEAN`);
+        } else if (result.status === 'DIRTY') {
+            const issueCount = (result.report || '').split('\n').filter(l => l.trim()).length;
+            log('MAP', 'warn', `${displayName} → ${issueCount} issue${issueCount !== 1 ? 's' : ''} found`);
+        } else if (result.status === 'SKIP') {
+            log('MAP', 'dim', `Skipped: ${displayName}`);
+        } else {
+            log('MAP', 'error', `Failed: ${displayName} — ${(result.report || '').slice(0, 80)}`);
+        }
+
+        return result;
+    });
+    for await (const _ of pool) { /* drain */ }
+
+    const cleanCount = mapResults.filter(r => r.status === 'CLEAN').length;
+    const dirtyFiles = mapResults.filter(r => r.status === 'DIRTY');
+    const errorCount = mapResults.filter(r => r.status === 'ERROR' || r.status === 'SKIP').length;
+    const stats = { total, clean: cleanCount, dirty: dirtyFiles.length, errors: errorCount };
+
+    log('SWARM', 'info', `MAP complete: ${cleanCount} clean · ${dirtyFiles.length} flagged · ${errorCount} errors`);
+
+    if (!dirtyFiles.length) {
+        log('SWARM', 'info', '✅ All files clean — skipping reduce phase');
+        onPhaseChange?.('done');
+        return {
+            mapResults,
+            summary: `✅ Swarm complete. All ${cleanCount} scanned files are clean.${errorCount > 0 ? ` (${errorCount} files skipped)` : ''}`,
+            stats,
+        };
+    }
+
+    // ── REDUCE ────────────────────────────────────────────────────────────────
+    onPhaseChange?.('reduce');
+    const compressed = compressReports(dirtyFiles, filterInfo);
+    const reducePrompt = strategy.reduce(compressed, stats);
+    log('REDUCE', 'info', `Synthesizing ${dirtyFiles.length} flagged files with ${finalReduceModel}…`);
+
+    let reduceRes;
+    try {
+        reduceRes = await fetch(`${BRIDGE}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: finalReduceModel,
+                prompt: reducePrompt,
+                stream: true,
+                options: { num_ctx: REDUCE_CTX, temperature: 0.3, num_predict: REDUCE_MAX_PREDICT, repeat_penalty: 1.05 },
+            }),
+            signal,
+        });
+    } catch (fetchErr) {
+        if (fetchErr.name === 'AbortError') throw fetchErr;
+        // Network-level failure — fallback to raw map findings
+        log('REDUCE', 'error', `Reduce fetch failed: ${fetchErr.message}`);
+        log('REDUCE', 'warn', 'Falling back to raw map findings');
+        onPhaseChange?.('done');
+        return { mapResults, summary: `## ⚠️ Reduce Failed — Raw Map Findings\n\n${compressed}`, stats };
+    }
+
+    if (!reduceRes.ok) {
+        const errText = await reduceRes.text();
+        log('REDUCE', 'error', `HTTP ${reduceRes.status}: ${errText.slice(0, 120)}`);
+        log('REDUCE', 'warn', 'Falling back to raw map findings');
+        // Fallback instead of throwing — return the raw map findings
+        onPhaseChange?.('done');
+        return { mapResults, summary: `## ⚠️ Reduce Failed (HTTP ${reduceRes.status}) — Raw Map Findings\n\n${compressed}`, stats };
+    }
+
+    const reader = reduceRes.body.getReader();
+    const decoder = new TextDecoder();
+    let fullReport = '', buf = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+                const c = JSON.parse(line);
+                if (c.response) { fullReport += c.response; onReduceStream?.(c.response); }
+            } catch { /* skip malformed */ }
+        }
+    }
+
+    log('REDUCE', 'info', `Synthesis complete — ${fullReport.length} chars`);
+    onPhaseChange?.('done');
+    return { mapResults, summary: fullReport, stats };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HELPER: fetchSwarmFileList — full repo code files
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CODE_EXTS = new Set([
+    'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+    'py', 'rb', 'go', 'rs', 'java', 'kt',
+    'c', 'cpp', 'h', 'hpp', 'cs', 'swift', 'php',
+    'vue', 'svelte', 'json', 'yaml', 'yml', 'toml',
+]);
+
+const SKIP_FILES = new Set([
+    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+    'composer.lock', 'Gemfile.lock', 'Cargo.lock', 'poetry.lock',
+]);
+
+export async function fetchSwarmFileList(extensions) {
+    const extSet = extensions
+        ? new Set(extensions.map(e => e.toLowerCase().replace(/^\./, '')))
+        : CODE_EXTS;
+    try {
+        const res = await fetch(`${BRIDGE}/project/tree?deep=true`);
+        const data = await res.json();
+        if (data.error) return [];
+        return (data.entries || [])
+            .filter(e => e.type === 'file')
+            .filter(e => !SKIP_FILES.has(e.name))
+            .filter(e => extSet.has(e.name.split('.').pop()?.toLowerCase() ?? ''))
+            .map(e => e.relative || e.name);
+    } catch { return []; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HELPER: Neighborhood / Blast Radius
+//
+//  fetchNeighborFiles(centerFile, allFiles) returns the "blast radius" of
+//  a single file: itself + all files it directly imports (resolved) + every
+//  code file in the same directory.
+//
+//  This is the SCOPE_NEIGHBORS list — focused enough to avoid scanning the
+//  whole repo, wide enough to catch everything a change to centerFile would
+//  touch.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parse all local import paths from a source file.
+ * Handles: import ... from './x', import('./x'), require('./x')
+ * Ignores node_modules (paths without './' or '../').
+ */
+export function parseLocalImports(source) {
+    const paths = new Set();
+    const patterns = [
+        /from\s+['"](\.[^'"]+)['"]/g,
+        /import\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
+        /require\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g,
+    ];
+    for (const re of patterns) {
+        let m;
+        while ((m = re.exec(source)) !== null) paths.add(m[1]);
+    }
+    return [...paths];
+}
+
+/** Pure posix path resolver (no node:path — runs in renderer/browser) */
+function resolvePosix(baseDir, relPath) {
+    const parts = baseDir ? baseDir.split('/') : [];
+    for (const seg of relPath.split('/')) {
+        if (seg === '..') parts.pop();
+        else if (seg !== '.') parts.push(seg);
+    }
+    return parts.join('/');
+}
+
+/**
+ * Resolve an import path to a concrete file in allFiles.
+ * Tries the bare path plus common extensions and /index variants.
+ */
+export function resolveImport(importPath, fromFile, allFiles) {
+    const norm = p => p.replace(/\\/g, '/');
+    const fromDir = norm(fromFile).split('/').slice(0, -1).join('/');
+    const base = norm(resolvePosix(fromDir, importPath));
+    const suffixes = ['', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+        '/index.js', '/index.jsx', '/index.ts', '/index.tsx'];
+    for (const s of suffixes) {
+        const candidate = base + s;
+        const match = allFiles.find(f => norm(f) === candidate);
+        if (match) return match;
+    }
+    return null;
+}
+
+/**
+ * Build the neighborhood file set for a center file.
+ *   - Level 0: the file itself
+ *   - Level 1: all files it directly imports (local imports only)
+ *   - Level 1: all code-file siblings in the same directory
+ *
+ * @param {string}   centerFile   e.g. 'src/App.jsx'
+ * @param {string[]} allFiles     Output of fetchSwarmFileList()
+ * @returns {Promise<string[]>}   Deduplicated, sorted neighbor list
+ */
+export async function fetchNeighborFiles(centerFile, allFiles) {
+    const norm = p => p.replace(/\\/g, '/');
+    const center = norm(centerFile);
+    const centerDir = center.split('/').slice(0, -1).join('/');
+    const neighborhood = new Set([center]);
+
+    // ── Direct imports ─────────────────────────────────────────────────────
+    const content = await (async () => {
+        try {
+            const res = await fetch(`${BRIDGE}/project/file?rel=${encodeURIComponent(center)}`, { cache: 'no-store' });
+            const data = await res.json();
+            return data?.content ?? null;
+        } catch { return null; }
+    })();
+
+    if (content) {
+        for (const imp of parseLocalImports(content)) {
+            const resolved = resolveImport(imp, center, allFiles);
+            if (resolved) neighborhood.add(norm(resolved));
+        }
+    }
+
+    // ── Directory siblings ─────────────────────────────────────────────────
+    for (const f of allFiles) {
+        const fn = norm(f);
+        const dir = fn.split('/').slice(0, -1).join('/');
+        const ext = fn.split('.').pop()?.toLowerCase() ?? '';
+        if (dir === centerDir && CODE_EXTS.has(ext) && !SKIP_FILES.has(fn.split('/').pop() ?? '')) {
+            neighborhood.add(fn);
+        }
+    }
+
+    return [...neighborhood].sort();
+}
