@@ -18,7 +18,7 @@ This repository remains as a blueprint for building high-contrast, zero-latency 
 
 ---
 
-# �🛡️ ShadowDeck (Original Documentation)
+# 🛡️ ShadowDeck (Original Documentation)
 
 > AI-powered developer command center. Intercepts IDE signals, routes code through a Council of AI Agents, and displays results in a sci-fi terminal interface.
 
