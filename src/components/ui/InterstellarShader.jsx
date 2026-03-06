@@ -1,22 +1,12 @@
 import { useEffect, useRef } from "react"
 import * as THREE from "three"
-import { hexToRgb } from "@/lib/utils"
 
 /**
  * Interstellar shader — mosaic beam lines.
- * @param {{ color?: string }} props - Hex accent color (default: "#14b8a6")
  */
-export function InterstellarShader({ color = "#14b8a6" }) {
+export function InterstellarShader() {
   const containerRef = useRef(null)
   const sceneRef = useRef(null)
-  const colorRef = useRef(hexToRgb(color))
-
-  useEffect(() => {
-    colorRef.current = hexToRgb(color)
-    if (sceneRef.current?.uniforms?.uAccent) {
-      sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
-    }
-  }, [color])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -35,7 +25,6 @@ export function InterstellarShader({ color = "#14b8a6" }) {
       precision highp float;
       uniform vec2 resolution;
       uniform float time;
-      uniform vec3 uAccent;
 
       float random (in float x) {
         return fract(sin(x)*1e4);
@@ -62,9 +51,7 @@ export function InterstellarShader({ color = "#14b8a6" }) {
           }
         }
 
-        // Compute brightness, tint with accent color
-        float brightness = max(max(intensity[0], intensity[1]), intensity[2]);
-        gl_FragColor = vec4(brightness * uAccent, 1.0);
+        gl_FragColor = vec4(intensity, 1.0);
       }
     `
 
@@ -73,11 +60,9 @@ export function InterstellarShader({ color = "#14b8a6" }) {
     const scene = new THREE.Scene()
     const geometry = new THREE.PlaneGeometry(2, 2)
 
-    const rgb = colorRef.current
     const uniforms = {
       time: { type: "f", value: 1.0 },
       resolution: { type: "v2", value: new THREE.Vector2() },
-      uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
     }
 
     const material = new THREE.ShaderMaterial({
@@ -106,8 +91,6 @@ export function InterstellarShader({ color = "#14b8a6" }) {
     const animate = () => {
       const animationId = requestAnimationFrame(animate)
       uniforms.time.value += 0.05
-      const c = colorRef.current
-      uniforms.uAccent.value.set(c[0], c[1], c[2])
       renderer.render(scene, camera)
       if (sceneRef.current) sceneRef.current.animationId = animationId
     }

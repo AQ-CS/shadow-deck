@@ -18,6 +18,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Shell } from './components/Layout/Shell';
 import { CommandCenter } from './components/Views/CommandCenter';
 import { Settings } from './components/Views/Settings';
+import { Laboratory } from './components/Views/Laboratory';
 
 const { ipcRenderer } = window.require('electron');
 
@@ -36,11 +37,17 @@ const BRIDGE = 'http://localhost:9090';
 export default function App() {
   // ── Config state ──────────────────────────────────────────────────────────
   const [config, setConfig] = useState({
-    mode: 'local',
+    mode: 'hybrid',
     activeProfile: 'beast',
     apiKeys: { gemini: '', openai: '' },
+    providers: {
+      groqApiKey: '',
+      githubModelsApiKey: '',
+      ollamaUrl: 'http://localhost:11434',
+    },
     ui: { accentColor: '#14b8a6', background: 'pulse', glareShield: false },
     incognito: false,
+    usage: { groqDailyUsage: 0, githubDailyUsage: 0, usageResetDate: '' },
   });
 
   // ── App state ─────────────────────────────────────────────────────────────
@@ -73,6 +80,8 @@ export default function App() {
       const updated = {
         ...prev, ...patch,
         apiKeys: patch.apiKeys ? { ...prev.apiKeys, ...patch.apiKeys } : prev.apiKeys,
+        providers: patch.providers ? { ...prev.providers, ...patch.providers } : prev.providers,
+        usage: patch.usage ? { ...prev.usage, ...patch.usage } : prev.usage,
         ui: patch.ui ? { ...prev.ui, ...patch.ui } : prev.ui,
       };
       fetch(`${BRIDGE}/store/config`, {
@@ -137,8 +146,8 @@ export default function App() {
         aria-hidden="true"
       >
         <Suspense fallback={null}>
-          {activeBg === 'pulse' && <ShaderAnimation color={accentColor} />}
-          {activeBg === 'interstellar' && <InterstellarShader color={accentColor} />}
+          {activeBg === 'pulse' && <ShaderAnimation />}
+          {activeBg === 'interstellar' && <InterstellarShader />}
           {activeBg === 'neon' && <ShaderBackground color={accentColor} />}
           {activeBg === 'sky' && <SkyBackground color={accentColor} />}
         </Suspense>
@@ -179,6 +188,15 @@ export default function App() {
                 <CommandCenter
                   projectRoot={activeProject}
                   isConnected={!!activeProject}
+                />
+              )}
+
+              {activeView === 'lab' && (
+                <Laboratory
+                  accentColor={accentColor}
+                  glare={glareShield}
+                  projectRoot={activeProject}
+                  config={config}
                 />
               )}
 

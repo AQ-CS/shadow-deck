@@ -1,23 +1,12 @@
 import { useEffect, useRef } from "react"
 import * as THREE from "three"
-import { hexToRgb } from "@/lib/utils"
 
 /**
  * Pulse shader — animated beam lines.
- * @param {{ color?: string }} props - Hex accent color (default: "#14b8a6")
  */
-export function ShaderAnimation({ color = "#14b8a6" }) {
+export function ShaderAnimation() {
   const containerRef = useRef(null)
   const sceneRef = useRef(null)
-  const colorRef = useRef(hexToRgb(color))
-
-  // Keep colorRef in sync with prop
-  useEffect(() => {
-    colorRef.current = hexToRgb(color)
-    if (sceneRef.current?.uniforms?.uAccent) {
-      sceneRef.current.uniforms.uAccent.value.set(...colorRef.current)
-    }
-  }, [color])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -37,7 +26,6 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
       precision highp float;
       uniform vec2 resolution;
       uniform float time;
-      uniform vec3 uAccent;
 
       void main(void) {
         vec2 uv = (gl_FragCoord.xy * 2.0 - resolution.xy) / min(resolution.x, resolution.y);
@@ -51,9 +39,7 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
           }
         }
 
-        // Use max channel as brightness, multiply by accent color
-        float brightness = max(max(intensity[0], intensity[1]), intensity[2]);
-        gl_FragColor = vec4(brightness * uAccent, 1.0);
+        gl_FragColor = vec4(intensity, 1.0);
       }
     `
 
@@ -63,11 +49,9 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
     const scene = new THREE.Scene()
     const geometry = new THREE.PlaneGeometry(2, 2)
 
-    const rgb = colorRef.current
     const uniforms = {
       time: { type: "f", value: 1.0 },
       resolution: { type: "v2", value: new THREE.Vector2() },
-      uAccent: { type: "v3", value: new THREE.Vector3(rgb[0], rgb[1], rgb[2]) },
     }
 
     const material = new THREE.ShaderMaterial({
@@ -97,9 +81,6 @@ export function ShaderAnimation({ color = "#14b8a6" }) {
     const animate = () => {
       const animationId = requestAnimationFrame(animate)
       uniforms.time.value += 0.02
-      // Update accent color from ref each frame
-      const c = colorRef.current
-      uniforms.uAccent.value.set(c[0], c[1], c[2])
       renderer.render(scene, camera)
 
       if (sceneRef.current) {

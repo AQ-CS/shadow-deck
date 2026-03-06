@@ -1,458 +1,521 @@
 // src/components/Views/Laboratory.jsx
 // ═══════════════════════════════════════════════════════════════════════════
-//  THE LABORATORY — Agent Prompt Editor
+//  THE LABORATORY — Agent Council Overview (v5: Multi-Provider Edition)
 //
-//  FIX #5: Phase 1 gutted prompts.js down to 3 agents (Inquisitor, Herald,
-//  Lawyer). This file previously tried to import and render 9 agents —
-//  the missing exports caused silent crashes. Fixed by:
-//    1. Removing all imports for non-existent agent systems.
-//    2. Updating AGENT_META to only list the 3 surviving agents.
-//    3. Updating DEFAULT_PROMPTS to only map those 3 keys.
+//  ARCHITECTURE:
+//    • Renders a grid of 6 Agent Cards — one per council member.
+//    • Each card shows: icon, name, role description, provider badge, model,
+//      and an [ Initialize ] button that opens the Pre-Flight Modal.
+//    • Clicking [ Initialize ] never executes immediately. It opens the
+//      Pre-Flight Modal so the user can review scope, provider, and model.
+//    • A Usage Tracker bar shows live Groq / GitHub daily consumption.
+//    • A TerminalLog panel at the bottom shows output from this view's
+//      own useChatEngine instance.
 //
-//  Layout:
-//    ┌─────────────────────────────────────────────────────┐
-//    │  LEFT RAIL: Agent list cards                        │
-//    ├─────────────────────────────────────────────────────┤
-//    │  RIGHT PANEL: Active prompt textarea + controls     │
-//    └─────────────────────────────────────────────────────┘
+//  PROPS:
+//    accentColor   — global accent hex
+//    glare         — glare shield active
+//    projectRoot   — absolute path of connected project (may be null)
+//    config        — current store config (for providers check)
 // ═══════════════════════════════════════════════════════════════════════════
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    Save, RotateCcw, Copy, Check, FlaskConical,
-    AlertTriangle, CheckCircle2, Info, ChevronRight,
+    FlaskConical, Activity, Zap, Cloud, Server,
+    XCircle, Trash2, StopCircle,
 } from 'lucide-react';
 import {
     AGENT_TYPES,
     AGENT_DESCRIPTIONS,
-    INQUISITOR_SYSTEM,
-    HERALD_SYSTEM,
-    LAWYER_SYSTEM,
+    AGENT_PROVIDER,
+    AGENT_MODELS,
+    AGENT_SCOPE_LABEL,
+    PROVIDER_META,
+    PROVIDER_LIMITS,
 } from '../../agents/prompts';
+import { useChatEngine } from '../../hooks/useChatEngine';
+import { PreFlightModal } from '../PreFlightModal';
+import { TerminalLog } from '../arsenal/TerminalLog';
 
-const BRIDGE = 'http://localhost:9090';
+// ── Agent display metadata ─────────────────────────────────────────────────────
 
-// ── Default prompts indexed by agent key ─────────────────────────────────────
-// FIX #5: Only map the 3 agents that actually exist in prompts.js.
-// The old DEFAULT_PROMPTS had 9 entries pointing to undefined exports.
-const DEFAULT_PROMPTS = {
-    [AGENT_TYPES.INQUISITOR]: INQUISITOR_SYSTEM,
-    [AGENT_TYPES.HERALD]: HERALD_SYSTEM,
-    [AGENT_TYPES.LAWYER]: LAWYER_SYSTEM,
-};
-
-// FIX #5: Trimmed from 9 agents to 3. The old array referenced AGENT_TYPES
-// keys that no longer exist (WRAITH, ARCHITECT, ARTIST, GHOST, SENTINEL, SCRIBE),
-// causing the UI to map over undefined properties and crash silently.
-const AGENT_META = [
+const COUNCIL = [
     {
         key: AGENT_TYPES.INQUISITOR,
-        label: 'Inquisitor',
+        label: 'The Inquisitor',
+        role: 'File Linter',
         icon: '🔎',
         color: '#f97316',
-        model: 'deepseek-r1:14b',
+    },
+    {
+        key: AGENT_TYPES.FORGER,
+        label: 'The Forger',
+        role: 'Unit Test Forge',
+        icon: '⚒️',
+        color: '#22d3ee',
     },
     {
         key: AGENT_TYPES.HERALD,
-        label: 'Herald',
+        label: 'The Herald',
+        role: 'Commit Generator',
         icon: '📣',
         color: '#38bdf8',
-        model: 'qwen3.5:9b',
+    },
+    {
+        key: AGENT_TYPES.ARCHITECT,
+        label: 'The Architect',
+        role: 'Deep Refactor',
+        icon: '🏗️',
+        color: '#818cf8',
+    },
+    {
+        key: AGENT_TYPES.VAULT_GUARD,
+        label: 'The Vault Guard',
+        role: 'Secret Scanner',
+        icon: '🔒',
+        color: '#4ade80',
     },
     {
         key: AGENT_TYPES.LAWYER,
-        label: 'Lawyer',
+        label: 'The Lawyer',
+        role: 'License Audit',
         icon: '⚖️',
         color: '#eab308',
-        model: 'qwen3.5:9b',
     },
 ];
 
-// ── Token estimator (rough: 1 token ≈ 4 chars) ───────────────────────────────
-function estimateTokens(text) {
-    return Math.ceil((text || '').length / 4);
-}
+// ── Provider Badge ─────────────────────────────────────────────────────────────
 
-// Token budget indicator
-function TokenBar({ tokens, accentColor }) {
-    const WARN = 1200;
-    const LIMIT = 2048;
-    const pct = Math.min((tokens / LIMIT) * 100, 100);
-    const color = tokens > LIMIT ? '#f43f5e' : tokens > WARN ? '#f59e0b' : '#22c55e';
+function ProviderBadge({ provider }) {
+    const meta = PROVIDER_META[provider] || PROVIDER_META.ollama;
+    const icons = { groq: Zap, github: Cloud, ollama: Server };
+    const Icon = icons[provider] || Server;
 
     return (
-        <div className="flex items-center gap-2">
-            <div className="h-1 w-24 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: color }} />
-            </div>
-            <span className="text-[10px] font-mono" style={{ color }}>
-                ~{tokens.toLocaleString()} tokens
-            </span>
-            {tokens > LIMIT && (
-                <span className="text-[10px] text-rose-400 font-semibold">⚠ exceeds 2k</span>
+        <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider"
+            style={{
+                background: meta.bg,
+                border: `1px solid ${meta.border}`,
+                color: meta.color,
+            }}
+        >
+            <Icon size={9} />
+            {meta.label}
+        </span>
+    );
+}
+
+// ── Usage Tracker Bar ──────────────────────────────────────────────────────────
+
+function UsageTracker({ usageStats, borderColor, textDim }) {
+    // v6: usageStats is keyed by provider: { groq, github, openrouter }
+    // Each entry: { requests, inTokens, outTokens }
+    const groq = usageStats?.groq || {};
+    const github = usageStats?.github || {};
+    const openrouter = usageStats?.openrouter || {};
+
+    const groqReqs = groq.requests || 0;
+    const groqIn = groq.inTokens || 0;
+    const groqOut = groq.outTokens || 0;
+    const githubReqs = github.requests || 0;
+    const orReqs = openrouter.requests || 0;
+    const orIn = openrouter.inTokens || 0;
+    const orOut = openrouter.outTokens || 0;
+
+    const groqLimit = PROVIDER_LIMITS.groq;
+    const groqPct = Math.min((groqReqs / groqLimit) * 100, 100);
+    const groqColor = groqPct > 90 ? '#f43f5e' : groqPct > 70 ? '#f59e0b' : PROVIDER_META.groq.color;
+    const githubColor = PROVIDER_META.github.color;
+    const orColor = PROVIDER_META.openrouter?.color || '#38bdf8';
+
+    const fmtTok = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+
+    return (
+        <div className="flex items-center gap-3 flex-wrap">
+            {/* Groq */}
+            {groqReqs > 0 && (
+                <div className="flex items-center gap-1.5">
+                    <Zap size={9} style={{ color: groqColor }} />
+                    <div className="h-1 w-12 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.08)' }}>
+                        <div className="h-full rounded-full transition-all" style={{ width: `${groqPct}%`, backgroundColor: groqColor }} />
+                    </div>
+                    <span className="text-[10px] font-mono" style={{ color: groqColor }}>
+                        {groqReqs}req · {fmtTok(groqIn + groqOut)}t
+                    </span>
+                </div>
+            )}
+            {/* GitHub */}
+            {githubReqs > 0 && (
+                <div className="flex items-center gap-1.5">
+                    <Cloud size={9} style={{ color: githubColor }} />
+                    <span className="text-[10px] font-mono" style={{ color: githubColor }}>
+                        {githubReqs}req
+                    </span>
+                </div>
+            )}
+            {/* OpenRouter */}
+            {orReqs > 0 && (
+                <div className="flex items-center gap-1.5">
+                    <Activity size={9} style={{ color: orColor }} />
+                    <span className="text-[10px] font-mono" style={{ color: orColor }}>
+                        OR {orReqs}req · {fmtTok(orIn + orOut)}t
+                    </span>
+                </div>
+            )}
+            {groqReqs === 0 && githubReqs === 0 && orReqs === 0 && (
+                <span className="text-[10px] font-mono" style={{ color: textDim }}>no usage today</span>
             )}
         </div>
     );
 }
 
+// ── Agent Card ─────────────────────────────────────────────────────────────────
+
+function AgentCard({
+    agent, isRunning, isActive,
+    onInitialize,
+    accentColor, borderColor,
+    textPrimary, textSub, textDim,
+}) {
+    const provider = AGENT_PROVIDER[agent.key];
+    const model = AGENT_MODELS[agent.key];
+    const scope = AGENT_SCOPE_LABEL[agent.key];
+    const desc = AGENT_DESCRIPTIONS[agent.key];
+
+    const cardBorder = isActive
+        ? `color-mix(in srgb, ${agent.color} 45%, transparent)`
+        : borderColor;
+    const cardBg = isActive
+        ? `color-mix(in srgb, ${agent.color} 8%, rgba(0,0,0,0.5))`
+        : 'rgba(255,255,255,0.025)';
+
+    return (
+        <motion.div
+            layout
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col rounded-xl overflow-hidden border transition-colors"
+            style={{ borderColor: cardBorder, background: cardBg }}
+        >
+            {/* Card header */}
+            <div
+                className="flex items-center gap-3 px-4 py-3 border-b"
+                style={{
+                    borderColor: cardBorder,
+                    background: `color-mix(in srgb, ${agent.color} 5%, transparent)`,
+                }}
+            >
+                <span style={{ fontSize: 20 }}>{agent.icon}</span>
+                <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold tracking-wider uppercase" style={{ color: agent.color }}>
+                        {agent.label}
+                    </div>
+                    <div className="text-[10px] tracking-wide uppercase mt-0.5" style={{ color: textDim }}>
+                        {agent.role}
+                    </div>
+                </div>
+                {isActive && (
+                    <motion.div
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: agent.color }}
+                        animate={{ opacity: [1, 0.2, 1] }}
+                        transition={{ duration: 0.9, repeat: Infinity }}
+                    />
+                )}
+            </div>
+
+            {/* Card body */}
+            <div className="flex-1 flex flex-col px-4 py-3 gap-3">
+                {/* Description */}
+                <p className="text-[11px] leading-relaxed flex-1" style={{ color: textSub }}>
+                    {desc}
+                </p>
+
+                {/* Provider badge + model */}
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                    <ProviderBadge provider={provider} />
+                    <span className="text-[10px] font-mono truncate" style={{ color: textDim }} title={model}>
+                        {model}
+                    </span>
+                </div>
+
+                {/* Scope indicator */}
+                <div className="flex items-center gap-1.5">
+                    <Activity size={10} style={{ color: textDim }} />
+                    <span className="text-[10px] uppercase tracking-wider" style={{ color: textDim }}>
+                        {scope}
+                    </span>
+                </div>
+            </div>
+
+            {/* Initialize button */}
+            <div className="px-4 pb-4">
+                <motion.button
+                    onClick={() => onInitialize(agent.key)}
+                    disabled={isRunning}
+                    whileHover={!isRunning ? { scale: 1.02 } : {}}
+                    whileTap={!isRunning ? { scale: 0.97 } : {}}
+                    className="w-full py-2 rounded-lg text-[11px] font-bold tracking-widest uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{
+                        background: `color-mix(in srgb, ${agent.color} 14%, transparent)`,
+                        border: `1px solid color-mix(in srgb, ${agent.color} 35%, transparent)`,
+                        color: isActive ? agent.color : textSub,
+                    }}
+                >
+                    {isActive ? '▶ Running…' : '⚡ Initialize'}
+                </motion.button>
+            </div>
+        </motion.div>
+    );
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════
-//  Main Component
+//  Laboratory — Main Component
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function Laboratory({
     accentColor = '#14b8a6',
     glare = false,
+    projectRoot = null,
     config = {},
-    onConfigChange,
+    onViewChange = null,   // Called with 'chat' to redirect to CommandCenter after Execute
 }) {
-    // Saved overrides come from the global config store
-    const savedOverrides = config?.customPrompts || {};
+    // ── Engine ────────────────────────────────────────────────────────────────
+    const {
+        logs, isRunning, activeTask, streamBuffer,
+        usageStats, dispatch, clearLogs, abort, refreshUsage,
+    } = useChatEngine({ projectRoot });
 
-    // Local editing state — keyed by agent
-    const [drafts, setDrafts] = useState(() => ({ ...savedOverrides }));
-    const [activeKey, setActiveKey] = useState(AGENT_TYPES.INQUISITOR);
-    const [saveState, setSaveState] = useState('idle');   // 'idle' | 'saving' | 'saved' | 'error'
-    const [copied, setCopied] = useState(false);
-    const [showDiff, setShowDiff] = useState(false);
+    // ── Pre-Flight state ──────────────────────────────────────────────────────
+    const [preFlightKey, setPreFlightKey] = useState(null);
+    const [preFlightScope, setPreFlightScope] = useState(null);
+    const [scopeCount, setScopeCount] = useState(null);
 
-    // Sync if config loads async
-    useEffect(() => {
-        if (config?.customPrompts) {
-            setDrafts(prev => ({ ...config.customPrompts, ...prev }));
-        }
-    }, [config?.customPrompts]);
+    // Refresh usage stats on mount
+    useEffect(() => { refreshUsage(); }, [refreshUsage]);
 
-    // ── Active agent data ─────────────────────────────────────────────────────
-    const activeMeta = AGENT_META.find(a => a.key === activeKey) || AGENT_META[0];
-    const defaultPrompt = DEFAULT_PROMPTS[activeKey] || '';
-    const currentDraft = drafts[activeKey] ?? defaultPrompt;
-    const isModified = currentDraft !== defaultPrompt;
-    const tokens = useMemo(() => estimateTokens(currentDraft), [currentDraft]);
+    // ── Open Pre-Flight (fetch scope count for file-based agents) ─────────────
+    const handleInitialize = useCallback(async (agentKey) => {
+        if (isRunning) return;
 
-    // ── Edit ──────────────────────────────────────────────────────────────────
-    const handleEdit = useCallback((value) => {
-        setDrafts(prev => ({ ...prev, [activeKey]: value }));
-        setSaveState('idle');
-    }, [activeKey]);
-
-    // ── Save ──────────────────────────────────────────────────────────────────
-    const handleSave = useCallback(async () => {
-        setSaveState('saving');
-        let timerId;
-        try {
-            // Merge into existing config — only store overrides that differ from default
-            const overrides = {};
-            for (const [key, val] of Object.entries(drafts)) {
-                if (val !== DEFAULT_PROMPTS[key]) overrides[key] = val;
+        // For agents that need a file count, try to fetch project tree
+        const fileAgents = [AGENT_TYPES.INQUISITOR, AGENT_TYPES.FORGER, AGENT_TYPES.ARCHITECT];
+        if (fileAgents.includes(agentKey) && projectRoot) {
+            try {
+                const res = await fetch('http://localhost:9090/project/tree', { cache: 'no-store' });
+                const data = await res.json();
+                const fileCount = (data.entries || []).filter(e => e.type === 'file').length;
+                setScopeCount(fileCount);
+            } catch {
+                setScopeCount(null);
             }
-            await onConfigChange?.({ customPrompts: overrides });
-            setSaveState('saved');
-            timerId = window.setTimeout(() => setSaveState('idle'), 2500);
-        } catch {
-            setSaveState('error');
-            timerId = window.setTimeout(() => setSaveState('idle'), 3000);
+        } else {
+            setScopeCount(null);
         }
-    }, [drafts, onConfigChange]);
 
-    // ── Reset single agent ────────────────────────────────────────────────────
-    const handleReset = useCallback(() => {
-        setDrafts(prev => {
-            const next = { ...prev };
-            delete next[activeKey];
-            return next;
-        });
-        setSaveState('idle');
-    }, [activeKey]);
+        setPreFlightKey(agentKey);
+    }, [isRunning, projectRoot]);
 
-    // ── Reset all agents ──────────────────────────────────────────────────────
-    const handleResetAll = useCallback(async () => {
-        setDrafts({});
-        await onConfigChange?.({ customPrompts: {} });
-        setSaveState('idle');
-    }, [onConfigChange]);
+    // ── Execute (called by PreFlight confirm) ─────────────────────────────────
+    // UX Flow: dispatch → close modal → redirect to CommandCenter log stream
+    const handleExecute = useCallback(async (provider, model) => {
+        if (!preFlightKey) return;
 
-    // ── Copy prompt ───────────────────────────────────────────────────────────
-    const handleCopy = useCallback(() => {
-        navigator.clipboard.writeText(currentDraft);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-    }, [currentDraft]);
+        const fileAgents = [AGENT_TYPES.INQUISITOR, AGENT_TYPES.FORGER, AGENT_TYPES.ARCHITECT];
+        const payload = fileAgents.includes(preFlightKey) ? {} : {};
+
+        // Dispatch the agent task
+        dispatch(preFlightKey, payload, { provider, model });
+
+        // Close the Pre-Flight Modal immediately
+        setPreFlightKey(null);
+
+        // Redirect the user to CommandCenter so they can watch the log stream
+        onViewChange?.('chat');
+    }, [preFlightKey, dispatch, onViewChange]);
 
     // ── Colour tokens ─────────────────────────────────────────────────────────
-    const panelBg = glare ? 'rgba(0,0,0,0.92)' : 'rgba(0,0,0,0.55)';
-    const headerBg = glare ? 'rgba(0,0,0,0.90)' : 'rgba(0,0,0,0.70)';
+    const panelBg = glare ? 'rgba(0,0,0,0.95)' : 'rgba(0,0,0,0.88)';
+    const headerBg = glare ? 'rgba(0,0,0,0.95)' : 'rgba(0,0,0,0.88)';
     const textPrimary = glare ? '#ffffff' : '#e4e4e7';
     const textSub = glare ? '#a1a1aa' : '#71717a';
+    const textDim = glare ? '#71717a' : '#52525b';
     const borderColor = 'rgba(255,255,255,0.06)';
     const accentDim = `color-mix(in srgb, ${accentColor} 15%, transparent)`;
-    const accentBorder = `color-mix(in srgb, ${accentColor} 30%, transparent)`;
 
-    // Count how many agents have custom prompts
-    const modifiedCount = Object.keys(savedOverrides).length;
+    // Show terminal panel only when there's output
+    const showTerminal = logs.length > 0 || isRunning;
 
     return (
-        <div className="w-full h-full flex overflow-hidden" style={{ background: panelBg }}>
+        <div className="relative w-full h-full flex flex-col overflow-hidden" style={{ background: panelBg }}>
 
-            {/* ── LEFT RAIL: Agent list ── */}
+            {/* ── Pre-Flight Modal ── */}
+            <PreFlightModal
+                isOpen={!!preFlightKey}
+                agentKey={preFlightKey}
+                scopeCount={scopeCount}
+                usageStats={usageStats}
+                onExecute={handleExecute}
+                onClose={() => setPreFlightKey(null)}
+                accentColor={accentColor}
+                glare={glare}
+            />
+
+            {/* ── Header ── */}
             <div
-                className="w-56 shrink-0 flex flex-col border-r overflow-hidden"
-                style={{ borderColor, background: headerBg }}
+                className="flex items-center justify-between px-5 py-3 border-b shrink-0"
+                style={{ background: headerBg, borderColor }}
             >
-                {/* Header */}
-                <div
-                    className="flex items-center gap-2 px-4 py-3 shrink-0 border-b"
-                    style={{ borderColor }}
-                >
-                    <FlaskConical size={13} style={{ color: textSub }} />
-                    <span className="text-xs tracking-[0.25em] uppercase font-semibold" style={{ color: textSub }}>
-                        Council
+                <div className="flex items-center gap-2.5">
+                    <FlaskConical size={14} style={{ color: accentColor }} />
+                    <span className="text-xs tracking-[0.28em] uppercase font-bold" style={{ color: accentColor }}>
+                        The Council
                     </span>
-                    {modifiedCount > 0 && (
-                        <span
-                            className="ml-auto text-[10px] px-1.5 py-0.5 rounded font-semibold"
-                            style={{ background: accentDim, color: accentColor, border: `1px solid ${accentBorder}` }}
-                        >
-                            {modifiedCount} edited
+                    <span className="text-[10px] tracking-widest" style={{ color: textDim }}>
+                        · {COUNCIL.length} agents
+                    </span>
+                </div>
+
+                <div className="flex items-center gap-4">
+                    {/* Live usage tracker */}
+                    <UsageTracker usageStats={usageStats} borderColor={borderColor} textDim={textDim} />
+
+                    {/* Project status */}
+                    <div className="flex items-center gap-1.5">
+                        <div
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{
+                                backgroundColor: projectRoot ? '#22c55e' : '#f59e0b',
+                                boxShadow: projectRoot ? '0 0 6px #22c55e80' : '0 0 6px #f59e0b80',
+                            }}
+                        />
+                        <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: textDim }}>
+                            {projectRoot ? 'project linked' : 'no project'}
                         </span>
+                    </div>
+
+                    {/* Abort / Clear controls */}
+                    {isRunning && (
+                        <button
+                            onClick={abort}
+                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] uppercase tracking-wider transition-all"
+                            style={{ background: 'rgba(244,63,94,0.12)', border: '1px solid rgba(244,63,94,0.3)', color: '#f87171' }}
+                        >
+                            <StopCircle size={11} /> Abort
+                        </button>
+                    )}
+                    {logs.length > 0 && !isRunning && (
+                        <button
+                            onClick={clearLogs}
+                            className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] uppercase tracking-wider transition-all hover:opacity-80"
+                            style={{ color: textDim }}
+                        >
+                            <Trash2 size={11} />
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            {/* ── Agent Grid + Terminal ── */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+
+                {/* Grid */}
+                <div
+                    className="overflow-y-auto px-5 py-5"
+                    style={{ flex: showTerminal ? '0 0 auto' : '1 1 0', maxHeight: showTerminal ? '55%' : '100%' }}
+                >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {COUNCIL.map((agent, i) => (
+                            <motion.div
+                                key={agent.key}
+                                initial={{ opacity: 0, y: 12 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: i * 0.04, duration: 0.25 }}
+                            >
+                                <AgentCard
+                                    agent={agent}
+                                    isRunning={isRunning}
+                                    isActive={activeTask === agent.key}
+                                    onInitialize={handleInitialize}
+                                    accentColor={accentColor}
+                                    borderColor={borderColor}
+                                    textPrimary={textPrimary}
+                                    textSub={textSub}
+                                    textDim={textDim}
+                                />
+                            </motion.div>
+                        ))}
+                    </div>
+
+                    {/* No-project hint for file-based agents */}
+                    {!projectRoot && (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="mt-4 flex items-center justify-center gap-2 px-4 py-3 rounded-xl border"
+                            style={{ borderColor: 'rgba(245,158,11,0.25)', background: 'rgba(245,158,11,0.06)' }}
+                        >
+                            <XCircle size={12} style={{ color: '#f59e0b' }} />
+                            <span className="text-[11px]" style={{ color: '#f59e0b' }}>
+                                Connect a project to enable file-based agents (Inquisitor, Forger, Architect).
+                            </span>
+                        </motion.div>
                     )}
                 </div>
 
-                {/* Agent list — FIX #5: Now correctly maps only 3 agents */}
-                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1">
-                    {AGENT_META.map(({ key, label, icon, color }) => {
-                        const isActive = key === activeKey;
-                        const hasOverride = drafts[key] !== undefined && drafts[key] !== DEFAULT_PROMPTS[key];
-
-                        return (
-                            <button
-                                key={key}
-                                onClick={() => setActiveKey(key)}
-                                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all"
-                                style={{
-                                    background: isActive ? `color-mix(in srgb, ${color} 14%, rgba(0,0,0,0.4))` : 'transparent',
-                                    border: `1px solid ${isActive ? `color-mix(in srgb, ${color} 35%, transparent)` : 'rgba(255,255,255,0.04)'}`,
-                                }}
-                            >
-                                <span style={{ fontSize: 16 }}>{icon}</span>
-                                <div className="flex-1 min-w-0">
-                                    <div
-                                        className="text-xs font-semibold tracking-wider uppercase"
-                                        style={{ color: isActive ? color : textSub }}
-                                    >
-                                        {label}
-                                    </div>
-                                    <div className="text-[10px] mt-0.5 truncate" style={{ color: isActive ? `${color}99` : '#3f3f46' }}>
-                                        {AGENT_DESCRIPTIONS[key]?.slice(0, 36)}…
-                                    </div>
-                                </div>
-                                {/* Dot indicator for modified prompts */}
-                                {hasOverride && (
-                                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                                )}
-                            </button>
-                        );
-                    })}
-                </div>
-
-                {/* Reset all */}
-                {modifiedCount > 0 && (
-                    <div className="px-3 py-3 shrink-0 border-t" style={{ borderColor }}>
-                        <button
-                            onClick={handleResetAll}
-                            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-[11px] uppercase tracking-wider transition-all hover:opacity-80"
-                            style={{
-                                background: 'rgba(244,63,94,0.08)',
-                                border: '1px solid rgba(244,63,94,0.25)',
-                                color: '#f87171',
-                            }}
-                        >
-                            <RotateCcw size={10} />
-                            Reset all to defaults
-                        </button>
-                    </div>
-                )}
-            </div>
-
-            {/* ── RIGHT PANEL: Prompt editor ── */}
-            <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-
-                {/* Editor header */}
-                <div
-                    className="flex items-center justify-between gap-3 px-4 py-2.5 shrink-0 border-b"
-                    style={{ background: headerBg, borderColor }}
-                >
-                    {/* Agent identity */}
-                    <div className="flex items-center gap-2.5 min-w-0">
-                        <span style={{ fontSize: 18 }}>{activeMeta.icon}</span>
-                        <div>
-                            <div className="text-sm font-bold tracking-wider uppercase" style={{ color: activeMeta.color }}>
-                                {activeMeta.label}
-                            </div>
-                            <div className="text-[10px] font-mono" style={{ color: textSub }}>
-                                {activeMeta.model}
-                            </div>
-                        </div>
-                        {isModified && (
-                            <span
-                                className="text-[10px] px-2 py-0.5 rounded font-semibold ml-1"
-                                style={{ background: `color-mix(in srgb, ${activeMeta.color} 12%, transparent)`, color: activeMeta.color, border: `1px solid color-mix(in srgb, ${activeMeta.color} 30%, transparent)` }}
-                            >
-                                modified
-                            </span>
-                        )}
-                    </div>
-
-                    {/* Right controls */}
-                    <div className="flex items-center gap-2 shrink-0">
-                        <TokenBar tokens={tokens} accentColor={accentColor} />
-
-                        {/* Diff toggle */}
-                        {isModified && (
-                            <button
-                                onClick={() => setShowDiff(v => !v)}
-                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] uppercase tracking-wider transition-all hover:opacity-80"
-                                style={{
-                                    background: showDiff ? accentDim : 'transparent',
-                                    border: `1px solid ${showDiff ? accentBorder : borderColor}`,
-                                    color: showDiff ? accentColor : textSub,
-                                }}
-                            >
-                                <ChevronRight size={11} style={{ transform: showDiff ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
-                                Diff
-                            </button>
-                        )}
-
-                        {/* Copy */}
-                        <button
-                            onClick={handleCopy}
-                            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] uppercase tracking-wider transition-all hover:opacity-80"
-                            style={{ background: 'transparent', border: `1px solid ${borderColor}`, color: textSub }}
-                        >
-                            {copied ? <Check size={11} className="text-green-400" /> : <Copy size={11} />}
-                        </button>
-
-                        {/* Reset agent */}
-                        {isModified && (
-                            <button
-                                onClick={handleReset}
-                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] uppercase tracking-wider transition-all hover:opacity-80"
-                                style={{ background: 'rgba(244,63,94,0.08)', border: '1px solid rgba(244,63,94,0.2)', color: '#f87171' }}
-                            >
-                                <RotateCcw size={11} />
-                                Reset
-                            </button>
-                        )}
-
-                        {/* Save */}
-                        <button
-                            onClick={handleSave}
-                            disabled={saveState === 'saving'}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold uppercase tracking-wider transition-all hover:opacity-90 disabled:opacity-50"
-                            style={{
-                                background: saveState === 'saved' ? 'rgba(34,197,94,0.15)' : saveState === 'error' ? 'rgba(244,63,94,0.15)' : accentDim,
-                                border: `1px solid ${saveState === 'saved' ? 'rgba(34,197,94,0.35)' : saveState === 'error' ? 'rgba(244,63,94,0.35)' : accentBorder}`,
-                                color: saveState === 'saved' ? '#4ade80' : saveState === 'error' ? '#f87171' : accentColor,
-                            }}
-                        >
-                            {saveState === 'saving' ? (
-                                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
-                                    <Save size={11} />
-                                </motion.div>
-                            ) : saveState === 'saved' ? (
-                                <><CheckCircle2 size={11} /> Saved</>
-                            ) : saveState === 'error' ? (
-                                <><AlertTriangle size={11} /> Error</>
-                            ) : (
-                                <><Save size={11} /> Save</>
-                            )}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Diff view */}
+                {/* Terminal Output Panel */}
                 <AnimatePresence>
-                    {showDiff && isModified && (
+                    {showTerminal && (
                         <motion.div
+                            key="lab-terminal"
                             initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: 180, opacity: 1 }}
+                            animate={{ height: 'auto', opacity: 1 }}
                             exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.18 }}
-                            className="shrink-0 overflow-hidden border-b"
+                            transition={{ duration: 0.2 }}
+                            className="flex-1 border-t overflow-hidden flex flex-col min-h-0"
                             style={{ borderColor }}
                         >
-                            <div className="h-full grid grid-cols-2 divide-x" style={{ borderColor: borderColor }}>
-                                {/* Default */}
-                                <div className="flex flex-col overflow-hidden">
-                                    <div className="px-3 py-1.5 text-[10px] uppercase tracking-widest shrink-0" style={{ color: '#52525b', borderBottom: `1px solid ${borderColor}` }}>
-                                        Default
-                                    </div>
+                            {/* Terminal header */}
+                            <div
+                                className="flex items-center justify-between px-5 py-2 border-b shrink-0"
+                                style={{ background: headerBg, borderColor }}
+                            >
+                                <div className="flex items-center gap-2">
                                     <div
-                                        className="flex-1 overflow-y-auto px-3 py-2 text-[11px] font-mono leading-relaxed whitespace-pre-wrap"
-                                        style={{ color: '#52525b' }}
-                                    >
-                                        {defaultPrompt}
-                                    </div>
+                                        className="w-1.5 h-1.5 rounded-full"
+                                        style={{
+                                            backgroundColor: isRunning ? accentColor : '#52525b',
+                                            boxShadow: isRunning ? `0 0 6px ${accentColor}80` : 'none',
+                                        }}
+                                    />
+                                    <span className="text-[10px] uppercase tracking-widest font-mono" style={{ color: textDim }}>
+                                        {isRunning ? `${activeTask} — processing` : 'output'}
+                                    </span>
                                 </div>
-                                {/* Custom */}
-                                <div className="flex flex-col overflow-hidden">
-                                    <div
-                                        className="px-3 py-1.5 text-[10px] uppercase tracking-widest shrink-0"
-                                        style={{ color: activeMeta.color, borderBottom: `1px solid ${borderColor}` }}
-                                    >
-                                        Custom
-                                    </div>
-                                    <div
-                                        className="flex-1 overflow-y-auto px-3 py-2 text-[11px] font-mono leading-relaxed whitespace-pre-wrap"
-                                        style={{ color: textPrimary }}
-                                    >
-                                        {currentDraft}
-                                    </div>
-                                </div>
+                                {streamBuffer && (
+                                    <span className="text-[10px] font-mono animate-pulse" style={{ color: accentColor }}>
+                                        streaming…
+                                    </span>
+                                )}
+                            </div>
+
+                            {/* TerminalLog */}
+                            <div className="flex-1 overflow-hidden min-h-0">
+                                <TerminalLog
+                                    logs={logs}
+                                    streamBuffer={streamBuffer}
+                                    isRunning={isRunning}
+                                    activeTask={activeTask}
+                                    accentColor={accentColor}
+                                    glare={glare}
+                                />
                             </div>
                         </motion.div>
                     )}
                 </AnimatePresence>
-
-                {/* Agent description hint */}
-                <div
-                    className="flex items-start gap-2 px-4 py-2.5 shrink-0 border-b"
-                    style={{ background: 'rgba(255,255,255,0.015)', borderColor }}
-                >
-                    <Info size={11} style={{ color: textSub, marginTop: 1, shrink: 0 }} />
-                    <p className="text-[11px] leading-relaxed" style={{ color: textSub }}>
-                        {AGENT_DESCRIPTIONS[activeKey]}
-                    </p>
-                </div>
-
-                {/* Main textarea */}
-                <textarea
-                    value={currentDraft}
-                    onChange={e => handleEdit(e.target.value)}
-                    spellCheck={false}
-                    className="flex-1 w-full p-5 text-[12px] font-mono resize-none outline-none leading-relaxed"
-                    style={{
-                        background: 'transparent',
-                        color: textPrimary,
-                        caretColor: activeMeta.color,
-                        scrollbarWidth: 'thin',
-                        scrollbarColor: 'rgba(255,255,255,0.08) transparent',
-                        tabSize: 2,
-                    }}
-                    placeholder="Enter the system prompt for this agent…"
-                />
-
-                {/* Footer hint */}
-                <div
-                    className="flex items-center justify-between px-4 py-2 shrink-0 border-t text-[10px] font-mono"
-                    style={{ borderColor, color: '#3f3f46' }}
-                >
-                    <span>
-                        Changes apply to the next chat session.
-                        {!isModified && ' This agent is using the default prompt.'}
-                    </span>
-                    <span>{currentDraft.length.toLocaleString()} chars</span>
-                </div>
             </div>
         </div>
     );

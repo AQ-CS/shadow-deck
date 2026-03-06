@@ -1,37 +1,50 @@
 // src/hooks/useChatEngine.js
 // ═══════════════════════════════════════════════════════════════════════════
-//  ShadowDeck — Explicit Payload Router  (v4: Surgical Strike Edition)
+//  ShadowDeck — Multi-Provider Explicit Payload Router  (v6: Two-Path + Token Tracking)
 //
-//  ARCHITECTURE: Zero chat history. Zero swarm. Zero intent routing.
-//  This hook is a deterministic dispatch table:
+//  PROVIDER ROUTING:
+//    apiMode === 'streamlined':
+//      All cloud agents → OpenRouter (https://openrouter.ai/api/v1/chat/completions)
+//      Forced model: "openrouter/auto" (OpenRouter free routing)
+//    apiMode === 'power':
+//      'groq'   → Direct fetch to api.groq.com (OpenAI-compatible SSE)
+//      'github' → Direct fetch to models.inference.ai.azure.com (OpenAI SSE)
+//      'ollama' → Proxied through local bridge at /ai/generate (NDJSON)
 //
-//    dispatch(INQUISITOR, { filePath, content }) → streams JSON bug report
-//    dispatch(HERALD,     { projectRoot })        → fetches diff, streams commit
-//    dispatch(LAWYER,     { projectRoot })        → fetches pkg.json, streams risks
+//  TOKEN TRACKING:
+//    stream_options: { include_usage: true } is injected into all OpenAI-compat
+//    requests. The final SSE chunk containing chunk.usage is captured and passed
+//    to persistIncrementUsage(provider, inputTokens, outputTokens).
 //
-//  Each dispatch is fully stateless — a fresh [system, user] pair per call.
-//  Context from the previous call is DROPPED before the next begins.
-//  This guarantees we never blow out local VRAM or the Ollama context window.
-//
-//  Log format piped to TerminalLog:
-//    [INQUISITOR] Scanning auth.js... DIRTY — 2 issue(s) found
-//    [LAWYER] package.json... WARNING: GPL-3.0 detected in 'some-dep'
-//    [HERALD] Generating commit message...
+//  API keys are ALWAYS read from the store via the bridge immediately before
+//  each dispatch — never cached in module scope.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useState, useRef, useCallback } from 'react';
-import { constructPrompt, AGENT_TYPES } from '../agents/prompts';
+import { constructPrompt, AGENT_TYPES, AGENT_PROVIDER, AGENT_MODELS } from '../agents/prompts';
 import { sanitizeContext } from '../utils/ContextManager';
 
 const BRIDGE = 'http://localhost:9090';
 
-// ── Think-tag stripper ────────────────────────────────────────────────────────
-// DeepSeek-R1 wraps its chain-of-thought in <think> tags. We strip them before
-// delivering the final payload to the caller; they are reasoning internals, not output.
+// ── Provider Endpoints ────────────────────────────────────────────────────────
+
+const PROVIDER_URLS = {
+    groq: 'https://api.groq.com/openai/v1/chat/completions',
+    github: 'https://models.inference.ai.azure.com/chat/completions',
+    openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+};
+
+// OpenRouter forces this model for all free-tier streamlined routing
+const OPENROUTER_FREE_MODEL = 'openrouter/auto';
+
+// ── Text Utilities ─────────────────────────────────────────────────────────────
+
+/** Strip DeepSeek-R1 chain-of-thought tags before surfacing the output. */
 function stripThinkTags(raw) {
     return raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }
 
+/** Extract the outermost JSON object or array from a noisy string. */
 function extractJSON(text) {
     const firstBrace = text.indexOf('{');
     const firstBracket = text.indexOf('[');
@@ -47,21 +60,13 @@ function extractJSON(text) {
         start = firstBracket;
     }
 
-    let end = Math.max(lastBrace, lastBracket);
-
+    const end = Math.max(lastBrace, lastBracket);
     if (start === -1 || end === -1 || start > end) return text;
     return text.substring(start, end + 1);
 }
 
-// ── Bridge helpers ────────────────────────────────────────────────────────────
+// ── Bridge Helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Fetch the content of a single project file via the bridge.
- * Returns the file content string, or null on failure.
- *
- * @param {string} relativePath  — e.g. "package.json" or "src/auth.js"
- * @returns {Promise<string|null>}
- */
 async function bridgeFetchFile(relativePath) {
     try {
         const res = await fetch(
@@ -76,13 +81,6 @@ async function bridgeFetchFile(relativePath) {
     }
 }
 
-/**
- * Fetch the current git diff for the active project.
- * Returns { diff, diagnostics, truncated } or null on failure.
- *
- * @param {string} projectRoot
- * @returns {Promise<{diff: string, diagnostics: object, truncated: boolean}|null>}
- */
 async function bridgeFetchDiff(projectRoot) {
     try {
         const res = await fetch(`${BRIDGE}/git/diff`, {
@@ -103,45 +101,76 @@ async function bridgeFetchDiff(projectRoot) {
     }
 }
 
-/**
- * Stream a single stateless generation request to Ollama via the bridge.
- * Calls onChunk for every token chunk received.
- * Returns the full raw response string.
- *
- * @param {{ system: string, user: string, model: string }} promptPayload
- * @param {Function} onChunk   — (text: string) => void
- * @param {AbortSignal} signal
- * @returns {Promise<string>}
- */
-async function streamGenerate(promptPayload, onChunk, signal) {
-    const { system, user, model } = promptPayload;
+// ── Provider Config Loader ─────────────────────────────────────────────────────
+// Always re-reads from the bridge immediately before dispatch.
 
-    let res;
+async function fetchProviderConfig() {
     try {
-        res = await fetch(`${BRIDGE}/ai/generate`, {
+        const res = await fetch(`${BRIDGE}/store/config`, { cache: 'no-store' });
+        const config = await res.json();
+        return {
+            apiMode: config.apiMode || 'streamlined',
+            openrouterApiKey: config.providers?.openrouterApiKey || '',
+            groqApiKey: config.providers?.groqApiKey || '',
+            githubModelsApiKey: config.providers?.githubModelsApiKey || '',
+            ollamaUrl: config.providers?.ollamaUrl || 'http://localhost:11434',
+            usage: config.usage || {},
+        };
+    } catch {
+        return {
+            apiMode: 'streamlined',
+            openrouterApiKey: '', groqApiKey: '', githubModelsApiKey: '',
+            ollamaUrl: 'http://localhost:11434',
+            usage: {},
+        };
+    }
+}
+
+// ── Usage Counter — Token-Level ────────────────────────────────────────────────
+// Called AFTER the SSE stream ends with the final usage chunk.
+// provider     — 'groq' | 'github' | 'openrouter'
+// inputTokens  — from chunk.usage.prompt_tokens
+// outputTokens — from chunk.usage.completion_tokens
+
+async function persistIncrementUsage(provider, inputTokens = 0, outputTokens = 0) {
+    try {
+        await fetch(`${BRIDGE}/store/usage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: 'system', content: system },
-                    { role: 'user', content: user },
-                ],
-                stream: true,
-                options: {
-                    num_ctx: 8192,
-                    temperature: 0.1,
-                    repeat_penalty: 1.05,
-                },
-            }),
-            signal,
+            body: JSON.stringify({ provider, inputTokens, outputTokens }),
         });
-    } catch (err) {
-        throw new Error(`Fetch failed: ${err.message}`);
+        // Re-fetch the updated config so we can surface fresh stats
+        const res = await fetch(`${BRIDGE}/store/config`, { cache: 'no-store' });
+        const config = await res.json();
+        return config.usage || null;
+    } catch {
+        return null;
     }
+}
 
-    if (!res.ok) throw new Error(`Bridge responded ${res.status}: ${await res.text()}`);
-    if (!res.body) throw new Error('Bridge returned an empty response body');
+// ── Streaming — Ollama (NDJSON via local bridge proxy) ────────────────────────
+
+async function streamOllama({ system, user, model }, onChunk, signal, ollamaUrl) {
+    const useProxy = !ollamaUrl || ollamaUrl === 'http://localhost:11434';
+    const fetchUrl = useProxy ? `${BRIDGE}/ai/generate` : `${ollamaUrl}/api/chat`;
+
+    const res = await fetch(fetchUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model,
+            messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: user },
+            ],
+            stream: true,
+            options: { num_ctx: 8192, temperature: 0.1, repeat_penalty: 1.05 },
+        }),
+        signal,
+    });
+
+    if (!res.ok) throw new Error(`Ollama bridge responded ${res.status}: ${await res.text()}`);
+    if (!res.body) throw new Error('Ollama bridge returned empty response body');
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -155,53 +184,175 @@ async function streamGenerate(promptPayload, onChunk, signal) {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep incomplete last line
+        buffer = lines.pop() || '';
 
         for (const line of lines) {
             if (!line.trim()) continue;
             try {
                 const chunk = JSON.parse(line);
                 const token = chunk.message?.content || chunk.response || '';
-                if (token) {
-                    full += token;
-                    onChunk(token);
-                }
-            } catch { /* skip malformed JSON chunk */ }
+                if (token) { full += token; onChunk(token); }
+            } catch { /* skip malformed NDJSON */ }
         }
     }
 
-    return full;
+    return { text: full, inputTokens: 0, outputTokens: 0 };
+}
+
+// ── Streaming — OpenAI-compatible SSE (Groq / GitHub / OpenRouter) ─────────────
+//
+// stream_options.include_usage = true is mandatory.
+// The final non-[DONE] chunk will carry chunk.usage — we capture it.
+
+async function streamOpenAICompat({ baseURL, apiKey, model, messages, temperature = 0.1 }, onChunk, signal) {
+    const res = await fetch(baseURL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+            model,
+            messages,
+            stream: true,
+            temperature,
+            max_tokens: 4096,
+            stream_options: { include_usage: true },   // ← TOKEN TRACKING REQUIREMENT
+        }),
+        signal,
+    });
+
+    if (!res.ok) {
+        const errText = await res.text();
+        const hostname = new URL(baseURL).hostname;
+        throw new Error(`${hostname} error ${res.status}: ${errText.slice(0, 300)}`);
+    }
+    if (!res.body) throw new Error('Provider returned empty response body');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let full = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6).trim();
+            if (data === '[DONE]') continue;
+            try {
+                const chunk = JSON.parse(data);
+
+                // ── Token capture from final usage chunk ──────────────────
+                if (chunk.usage) {
+                    inputTokens = chunk.usage.prompt_tokens || 0;
+                    outputTokens = chunk.usage.completion_tokens || 0;
+                }
+
+                const token = chunk.choices?.[0]?.delta?.content || '';
+                if (token) { full += token; onChunk(token); }
+            } catch { /* skip malformed SSE chunk */ }
+        }
+    }
+
+    return { text: full, inputTokens, outputTokens };
+}
+
+// ── Unified Stream Router ──────────────────────────────────────────────────────
+//
+// In 'streamlined' mode, ALL cloud agents (groq, github) are redirected to
+// OpenRouter with the free model. Ollama is always routed locally.
+
+async function streamToProvider(
+    { provider, model, system, user },
+    providerConfig,
+    onChunk,
+    signal
+) {
+    const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+    ];
+
+    const { apiMode } = providerConfig;
+
+    // ── Streamlined path: everything cloud → OpenRouter ────────────────────
+    if (apiMode === 'streamlined' && provider !== 'ollama') {
+        if (!providerConfig.openrouterApiKey) {
+            throw new Error('OpenRouter API key not configured. Go to Settings → API Key Vault → Streamlined.');
+        }
+        return streamOpenAICompat({
+            baseURL: PROVIDER_URLS.openrouter,
+            apiKey: providerConfig.openrouterApiKey,
+            model: OPENROUTER_FREE_MODEL,
+            messages,
+        }, onChunk, signal).then(result => ({ ...result, resolvedProvider: 'openrouter' }));
+    }
+
+    // ── Power path: per-provider routing ──────────────────────────────────
+    switch (provider) {
+        case 'groq': {
+            if (!providerConfig.groqApiKey) {
+                throw new Error('Groq API key not configured. Go to Settings → API Key Vault.');
+            }
+            return streamOpenAICompat({
+                baseURL: PROVIDER_URLS.groq,
+                apiKey: providerConfig.groqApiKey,
+                model, messages,
+            }, onChunk, signal).then(result => ({ ...result, resolvedProvider: 'groq' }));
+        }
+        case 'github': {
+            if (!providerConfig.githubModelsApiKey) {
+                throw new Error('GitHub Models API key not configured. Go to Settings → API Key Vault.');
+            }
+            return streamOpenAICompat({
+                baseURL: PROVIDER_URLS.github,
+                apiKey: providerConfig.githubModelsApiKey,
+                model, messages,
+            }, onChunk, signal).then(result => ({ ...result, resolvedProvider: 'github' }));
+        }
+        case 'ollama':
+        default: {
+            return streamOllama(
+                { system, user, model },
+                onChunk, signal,
+                providerConfig.ollamaUrl
+            ).then(result => ({ ...result, resolvedProvider: 'ollama' }));
+        }
+    }
 }
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Hook: useChatEngine  (Explicit Payload Router)
+//  Hook: useChatEngine  (Multi-Provider Explicit Payload Router)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * @param {Object}   opts
- * @param {string}   opts.projectRoot    — Absolute path to the active project
- * @param {Function} [opts.onBridgeError] — (err: Error) => void
- */
-export function useChatEngine({
-    projectRoot = null,
-    onBridgeError = null,
-} = {}) {
+export function useChatEngine({ projectRoot = null, onBridgeError = null } = {}) {
 
     // ── State ──────────────────────────────────────────────────────────────────
-    /** Array of { id, time, type, message } entries consumed by <TerminalLog /> */
     const [logs, setLogs] = useState([]);
-    /** The current task being executed, or null */
     const [activeTask, setActiveTask] = useState(null);
-    /** True while any dispatch is in-flight */
     const [isRunning, setIsRunning] = useState(false);
-    /** Partial streamed text for the active task (flushed ~60fps) */
     const [streamBuffer, setStreamBuffer] = useState('');
+    const [usageStats, setUsageStats] = useState({
+        groq: { requests: 0, inTokens: 0, outTokens: 0 },
+        github: { requests: 0, inTokens: 0, outTokens: 0 },
+        openrouter: { requests: 0, inTokens: 0, outTokens: 0 },
+    });
 
     // ── Refs ───────────────────────────────────────────────────────────────────
     const abortRef = useRef(null);
     const rafRef = useRef(null);
-    const streamRef = useRef('');  // accumulates raw streaming text
+    const streamRef = useRef('');
     let rafDirty = false;
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -246,28 +397,24 @@ export function useChatEngine({
         streamRef.current = '';
     }, []);
 
-    // ── Core Dispatch ──────────────────────────────────────────────────────────
-    /**
-     * Execute a single stateless agent task.
-     *
-     * For INQUISITOR: pass { filePath, content } — content is the raw file source.
-     * For HERALD:     pass { } — diff is auto-fetched from the bridge.
-     * For LAWYER:     pass { } — package.json is auto-fetched from the bridge.
-     *
-     * @param {'INQUISITOR'|'HERALD'|'LAWYER'} agentType
-     * @param {Object} payload
-     * @param {string}  [payload.filePath]   — INQUISITOR only
-     * @param {string}  [payload.content]    — INQUISITOR only (raw file source)
-     * @returns {Promise<string>}  The raw model output string
-     */
-    const dispatch = useCallback(async (agentType, payload = {}) => {
-        // ── Guard ────────────────────────────────────────────────────────────────
+    // ── Load Usage ─────────────────────────────────────────────────────────────
+    const refreshUsage = useCallback(async () => {
+        try {
+            const pc = await fetchProviderConfig();
+            if (pc.usage) setUsageStats(pc.usage);
+        } catch { /* non-critical */ }
+    }, []);
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Core Dispatch
+    // ══════════════════════════════════════════════════════════════════════════
+    const dispatch = useCallback(async (agentType, payload = {}, overrides = {}) => {
+
         if (!Object.values(AGENT_TYPES).includes(agentType)) {
             pushLog('ERROR', `Unknown agent type: "${agentType}"`);
             return '';
         }
 
-        // Abort any in-flight request before starting a new one
         abortRef.current?.abort();
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
@@ -279,28 +426,32 @@ export function useChatEngine({
         setActiveTask(agentType);
         setStreamBuffer('');
 
+        const provider = overrides.provider || AGENT_PROVIDER[agentType];
+        const model = overrides.model || AGENT_MODELS[agentType];
+
         try {
-            // ════════════════════════════════════════════════════════════════
-            //  STAGE 1: Fetch / validate the raw payload for this agent
-            // ════════════════════════════════════════════════════════════════
+            // ── STAGE 0: Read live provider config ──────────────────────────
+            const providerConfig = await fetchProviderConfig();
+
+            // ── STAGE 1: Fetch / validate raw payload ───────────────────────
             let rawContent = '';
             let filename = 'unknown';
 
             switch (agentType) {
 
-                // ── INQUISITOR: content comes from the TaskQueueEngine ───────
-                case AGENT_TYPES.INQUISITOR: {
+                case AGENT_TYPES.INQUISITOR:
+                case AGENT_TYPES.FORGER:
+                case AGENT_TYPES.ARCHITECT: {
                     if (!payload.content) {
-                        pushLog('ERROR', `[INQUISITOR] No content provided for dispatch.`);
+                        pushLog('ERROR', `[${agentType}] No file content provided.`);
                         return '';
                     }
                     rawContent = payload.content;
                     filename = payload.filePath || 'unknown';
-                    pushLog('INFO', `[INQUISITOR] Scanning ${filename}...`);
+                    pushLog('INFO', `[${agentType}] Processing ${filename}…`);
                     break;
                 }
 
-                // ── HERALD: fetch git diff from bridge ───────────────────────
                 case AGENT_TYPES.HERALD: {
                     if (!projectRoot) {
                         pushLog('ERROR', `[HERALD] No project root set. Connect a project first.`);
@@ -315,113 +466,175 @@ export function useChatEngine({
                     }
 
                     const lineCount = diffResult.diff.split('\n').length;
-                    pushLog('INFO', `[HERALD] Diff ready — ${lineCount} lines. Generating commit message...`);
+                    pushLog('INFO', `[HERALD] Diff ready — ${lineCount} lines. Generating commit message…`);
 
-                    if (diffResult.diff.length > 20000) {
-                        const staged = diffResult.diagnostics?.stagedFiles || [];
-                        const unstaged = diffResult.diagnostics?.unstagedFiles || [];
-                        const files = [...staged, ...unstaged].map(f => `- ${f}`).join('\n');
-                        rawContent = `CHANGED FILES:\n${files}\n\n${diffResult.diff.substring(0, 20000)}\n\n... [DIFF TRUNCATED TO PROTECT CONTEXT WINDOW] ....`;
-                    } else {
-                        rawContent = diffResult.diff;
-                    }
+                    rawContent = diffResult.diff.length > 20000
+                        ? `${diffResult.diff.substring(0, 20000)}\n\n... [DIFF TRUNCATED TO PROTECT CONTEXT WINDOW] ....`
+                        : diffResult.diff;
 
                     filename = 'git-diff';
                     break;
                 }
 
-                // ── LAWYER: fetch package.json from bridge ───────────────────
+                case AGENT_TYPES.VAULT_GUARD: {
+                    if (!projectRoot) {
+                        pushLog('ERROR', `[VAULT_GUARD] No project root set. Connect a project first.`);
+                        return '';
+                    }
+                    pushLog('INFO', `[VAULT_GUARD] 🔒 Running offline secret scan…`);
+
+                    if (payload.content) {
+                        rawContent = payload.content;
+                        filename = payload.filePath || 'project';
+                    } else {
+                        const pkgContent = await bridgeFetchFile('package.json');
+                        if (!pkgContent) {
+                            pushLog('ERROR', `[VAULT_GUARD] No content to scan. Connect project or pass file content.`);
+                            return '';
+                        }
+                        rawContent = pkgContent;
+                        filename = 'package.json';
+                    }
+                    pushLog('INFO', `[VAULT_GUARD] Scanning ${filename} for secrets…`);
+                    break;
+                }
+
                 case AGENT_TYPES.LAWYER: {
                     if (!projectRoot) {
                         pushLog('ERROR', `[LAWYER] No project root set. Connect a project first.`);
                         return '';
                     }
-                    pushLog('INFO', `[LAWYER] Fetching package.json...`);
+                    pushLog('INFO', `[LAWYER] Fetching package.json…`);
                     const pkgContent = await bridgeFetchFile('package.json');
 
                     if (!pkgContent) {
                         pushLog('ERROR', `[LAWYER] package.json not found in project root.`);
                         return '';
                     }
-                    pushLog('INFO', `[LAWYER] package.json loaded — scanning licenses...`);
+                    pushLog('INFO', `[LAWYER] package.json loaded — scanning licenses…`);
                     rawContent = pkgContent;
                     filename = 'package.json';
                     break;
                 }
+
+                default: {
+                    pushLog('ERROR', `[${agentType}] No payload handler defined.`);
+                    return '';
+                }
             }
 
-            // ════════════════════════════════════════════════════════════════
-            //  STAGE 2: Sanitize via ContextManager
-            //  This is the "butcher" pass — strips comments, SVG paths,
-            //  base64 blobs, and noise before the payload hits the model.
-            // ════════════════════════════════════════════════════════════════
+            // ── STAGE 2: Sanitize via ContextManager ────────────────────────
             let sanitized;
             try {
                 sanitized = sanitizeContext(rawContent, filename, agentType);
-            } catch (sanitizeErr) {
-                pushLog('ERROR', `[${agentType}] Context rejected: ${sanitizeErr.message}`);
+            } catch (err) {
+                pushLog('ERROR', `[${agentType}] Context rejected: ${err.message}`);
                 return '';
             }
 
-            // ════════════════════════════════════════════════════════════════
-            //  STAGE 3: Build the stateless prompt
-            //  CRITICAL: No history. No repo index. No rolling context.
-            //  Just system + user. Every call starts from zero.
-            // ════════════════════════════════════════════════════════════════
-            const promptPayload = constructPrompt(agentType, sanitized, {
-                filename,
-                projectRoot: projectRoot || undefined,
-            });
+            // ── STAGE 3: Build stateless prompt ─────────────────────────────
+            const promptPayload = constructPrompt(
+                agentType, sanitized,
+                { filename, projectRoot: projectRoot || undefined },
+                { provider, model }
+            );
+
+            // Log routing info (resolves apiMode display)
+            const effectiveProvider = providerConfig.apiMode === 'streamlined' && provider !== 'ollama'
+                ? 'openrouter'
+                : provider;
+            const effectiveModel = providerConfig.apiMode === 'streamlined' && provider !== 'ollama'
+                ? OPENROUTER_FREE_MODEL
+                : model;
 
             const estimatedTokens = Math.round(
                 (promptPayload.system.length + promptPayload.user.length) / 4
             );
-            pushLog('INFO', `[${agentType}] Payload: ~${estimatedTokens.toLocaleString()} tokens → ${promptPayload.model}`);
-
-            // ════════════════════════════════════════════════════════════════
-            //  STAGE 4: Stream the response
-            // ════════════════════════════════════════════════════════════════
-            const rawResult = await streamGenerate(
-                promptPayload,
-                (token) => {
-                    streamRef.current += token;
-                    scheduleStreamFlush();
-                },
-                controller.signal,
+            pushLog('INFO',
+                `[${agentType}] ~${estimatedTokens.toLocaleString()} tokens → ` +
+                `${effectiveProvider.toUpperCase()}/${effectiveModel}` +
+                (providerConfig.apiMode === 'streamlined' ? ' [streamlined]' : '')
             );
 
-            // ════════════════════════════════════════════════════════════════
-            //  STAGE 5: Parse and surface the result as CI/CD log lines
-            // ════════════════════════════════════════════════════════════════
+            // ── STAGE 4: Stream from provider ────────────────────────────────
+            const { text: rawResult, inputTokens, outputTokens, resolvedProvider } =
+                await streamToProvider(
+                    { provider, model, system: promptPayload.system, user: promptPayload.user },
+                    providerConfig,
+                    (token) => {
+                        streamRef.current += token;
+                        scheduleStreamFlush();
+                    },
+                    controller.signal,
+                );
+
+            // ── STAGE 4b: Increment usage counter with token counts ──────────
+            if (resolvedProvider !== 'ollama') {
+                const newUsage = await persistIncrementUsage(resolvedProvider, inputTokens, outputTokens);
+                if (newUsage) {
+                    setUsageStats(newUsage);
+                }
+                if (inputTokens || outputTokens) {
+                    pushLog('INFO',
+                        `[${agentType}] Tokens — prompt: ${inputTokens} | completion: ${outputTokens}`
+                    );
+                }
+            }
+
+            // ── STAGE 5: Parse and surface result ────────────────────────────
             const clean = stripThinkTags(rawResult);
 
             switch (agentType) {
 
                 case AGENT_TYPES.INQUISITOR: {
-                    try {
-                        const report = JSON.parse(extractJSON(clean));
-                        if (report.status === 'CLEAN') {
-                            pushLog('SUCCESS', `[INQUISITOR] ${filename} → CLEAN`);
-                        } else {
-                            const issues = report.issues || [];
-                            pushLog('WARNING', `[INQUISITOR] ${filename} → DIRTY — ${issues.length} issue(s) found`);
-                            for (const issue of issues) {
-                                const severity = issue.severity === 'CRITICAL' ? 'ERROR' : 'WARNING';
-                                pushLog(severity, `[INQUISITOR]   L${issue.line} [${issue.type}] ${issue.issue}`);
-                            }
-                        }
-                    } catch {
-                        // Model produced non-JSON — surface raw output for debugging
-                        pushLog('WARNING', `[INQUISITOR] ${filename} — response was not valid JSON. Raw output streamed above.`);
+                    // v6: output is now surgical patches, not JSON
+                    if (clean.includes('INQUISITOR: CLEAN')) {
+                        pushLog('SUCCESS', `[INQUISITOR] ${filename} → CLEAN`);
+                    } else {
+                        const patchCount = (clean.match(/^```\d+:\d+:/gm) || []).length;
+                        pushLog('WARNING',
+                            `[INQUISITOR] ${filename} → ${patchCount} patch(es) emitted. See stream above.`
+                        );
                     }
                     break;
                 }
 
+                case AGENT_TYPES.FORGER: {
+                    const lineCount = clean.split('\n').length;
+                    pushLog('SUCCESS', `[FORGER] Test suite generated — ${lineCount} lines. Copy from stream above.`);
+                    break;
+                }
+
                 case AGENT_TYPES.HERALD: {
-                    // Output is a single commit string — log it directly
                     const commitMsg = clean.split('\n')[0] || clean;
                     pushLog('SUCCESS', `[HERALD] Commit message ready:`);
                     pushLog('INFO', `[HERALD]   ${commitMsg}`);
+                    break;
+                }
+
+                case AGENT_TYPES.ARCHITECT: {
+                    const patchCount = (clean.match(/^```\d+:\d+:/gm) || []).length;
+                    pushLog('SUCCESS',
+                        `[ARCHITECT] Refactor complete — ${patchCount} patch(es) emitted. Copy from stream above.`
+                    );
+                    break;
+                }
+
+                case AGENT_TYPES.VAULT_GUARD: {
+                    try {
+                        const findings = JSON.parse(extractJSON(clean));
+                        if (!Array.isArray(findings) || findings.length === 0) {
+                            pushLog('SUCCESS', `[VAULT_GUARD] ${filename} → CLEAR — no secrets detected`);
+                        } else {
+                            pushLog('WARNING', `[VAULT_GUARD] ${filename} → ${findings.length} finding(s) detected`);
+                            for (const f of findings) {
+                                pushLog(f.severity === 'CRITICAL' ? 'ERROR' : 'WARNING',
+                                    `[VAULT_GUARD]   L${f.line} [${f.type}] ${f.finding}`);
+                            }
+                        }
+                    } catch {
+                        pushLog('WARNING', `[VAULT_GUARD] Response was not valid JSON. Raw output streamed above.`);
+                    }
                     break;
                 }
 
@@ -437,8 +650,8 @@ export function useChatEngine({
                         } else {
                             pushLog('WARNING', `[LAWYER] package.json → ${risks.length} risky license(s) detected`);
                             for (const dep of risks) {
-                                const level = dep.risk === 'HIGH_RISK' ? 'ERROR' : 'WARNING';
-                                pushLog(level, `[LAWYER]   ${dep.risk}: ${dep.license} detected in '${dep.name}' — ${dep.note}`);
+                                pushLog(dep.risk === 'HIGH_RISK' ? 'ERROR' : 'WARNING',
+                                    `[LAWYER]   ${dep.risk}: ${dep.license} in '${dep.name}' — ${dep.note}`);
                             }
                         }
                     } catch {
@@ -451,16 +664,12 @@ export function useChatEngine({
             return clean;
 
         } catch (err) {
-            if (err.name === 'AbortError') {
-                return '';
-            }
-            const msg = `[${agentType}] Bridge error: ${err.message}`;
-            pushLog('ERROR', msg);
+            if (err.name === 'AbortError') return '';
+            pushLog('ERROR', `[${agentType}] ${err.message}`);
             onBridgeError?.(err);
             return '';
 
         } finally {
-            // ── CRITICAL: Drop all context before the next task ──────────────
             if (rafRef.current) {
                 cancelAnimationFrame(rafRef.current);
                 rafRef.current = null;
@@ -476,19 +685,19 @@ export function useChatEngine({
 
     // ── Public API ─────────────────────────────────────────────────────────────
     return {
-        // State
         logs,
         isRunning,
         activeTask,
         streamBuffer,
+        usageStats,
 
-        // Actions
         dispatch,
         clearLogs,
         abort,
         pushLog,
+        refreshUsage,
 
-        // Convenience: expose bridge helpers for external use (e.g. TaskQueueEngine)
+        // Bridge helpers for TaskQueueEngine
         bridgeFetchFile,
         bridgeFetchDiff,
     };

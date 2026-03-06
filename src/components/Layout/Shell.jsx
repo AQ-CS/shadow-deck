@@ -159,10 +159,10 @@ export function Shell({
     const textMuted = glareShield ? '#d4d4d8' : '#a1a1aa';
     const textDim = glareShield ? '#a1a1aa' : '#71717a';
 
-    const panelBg = glareShield ? 'rgba(0,0,0,0.95)' : 'rgba(0,0,0,0.72)';
-    const sidebarBg = glareShield ? 'rgba(0,0,0,0.97)' : 'rgba(0,0,0,0.80)';
-    const statusBg = glareShield ? 'rgba(0,0,0,0.98)' : 'rgba(0,0,0,0.85)';
-    const borderColor = glareShield ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.07)';
+    const panelBg = glareShield ? 'rgba(0,0,0,0.98)' : 'rgba(0,0,0,0.88)';
+    const sidebarBg = glareShield ? 'rgba(0,0,0,0.98)' : 'rgba(0,0,0,0.92)';
+    const statusBg = glareShield ? 'rgba(0,0,0,0.98)' : 'rgba(0,0,0,0.95)';
+    const borderColor = glareShield ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.12)';
     const accentDim = `color-mix(in srgb, ${accentColor} 15%, transparent)`;
     const accentGlow = `0 0 12px color-mix(in srgb, ${accentColor} 50%, transparent)`;
 
@@ -311,7 +311,7 @@ export function Shell({
             <div
                 className="flex items-center px-4 h-9 shrink-0 border-b"
                 style={{
-                    background: glareShield ? 'rgba(0,0,0,0.90)' : 'rgba(0,0,0,0.60)',
+                    background: glareShield ? 'rgba(0,0,0,0.95)' : 'rgba(0,0,0,0.88)',
                     backdropFilter: 'blur(16px)',
                     WebkitBackdropFilter: 'blur(16px)',
                     borderColor,

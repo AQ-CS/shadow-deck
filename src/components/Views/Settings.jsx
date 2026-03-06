@@ -1,37 +1,62 @@
 // src/components/Views/Settings.jsx
-import React, { useState } from 'react';
+// ═══════════════════════════════════════════════════════════════════════════
+//  v6: Two-Path API Toggle (Streamlined / Power User) + Legacy Key Purge
+//
+//  CHANGES FROM v5.1:
+//    - PURGED: All gemini/openai legacy key state and UI
+//    - ADDED:  apiMode toggle ('streamlined' | 'power') at top of API Key Vault
+//    - Streamlined: single openrouterApiKey input with helper link
+//    - Power: groqApiKey + githubModelsApiKey + ollamaUrl inputs
+//    - apiMode persisted to store via onConfigChange({ apiMode })
+// ═══════════════════════════════════════════════════════════════════════════
+
+import React, { useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
     Shield, Key, Eye, EyeOff, Cpu, Cloud,
-    Zap, Gauge, Trash2, Download,
+    Zap, Gauge, Trash2, Download, Server,
+    ExternalLink, Layers, Wrench,
 } from 'lucide-react';
 
-// ── Profiles ─────────────────────────────────────────────────
+// ── Electron shell (safe import) ──────────────────────────────────────────────
+
+let _shell = null;
+try { _shell = window.require('electron').shell; } catch { /* non-Electron env */ }
+
+function openExternal(url) {
+    if (_shell) {
+        _shell.openExternal(url);
+    } else {
+        window.open(url, '_blank', 'noopener,noreferrer');
+    }
+}
+
+// ── Profiles ──────────────────────────────────────────────────────────────────
+
 const PROFILES = [
     {
         id: 'beast',
         label: 'The Beast',
-        sub: 'Local — Largest models, deepest analysis',
+        sub: 'Hybrid — Groq for speed, GitHub for depth, Local for privacy',
         icon: Zap,
-        mode: 'local',
+        mode: 'hybrid',
     },
     {
         id: 'operative',
         label: 'The Operative',
-        sub: 'Local — Fastest models, quick results',
+        sub: 'Local-first — All agents routed through Ollama',
         icon: Gauge,
         mode: 'local',
     },
     {
         id: 'cloud',
         label: 'The Cloud',
-        sub: 'API-only — Gemini / OpenAI backends',
+        sub: 'Cloud-only — Groq + GitHub Models, no local models required',
         icon: Cloud,
         mode: 'cloud',
     },
 ];
 
-// ── Backgrounds ──────────────────────────────────────────────
 const BACKGROUNDS = [
     { id: 'pulse', label: 'Pulse' },
     { id: 'interstellar', label: 'Interstellar' },
@@ -43,6 +68,121 @@ const COLOR_PRESETS = [
     '#14b8a6', '#22d3ee', '#34d399',
     '#8b5cf6', '#f43f5e', '#f59e0b', '#3b82f6',
 ];
+
+// ── HelperLink ────────────────────────────────────────────────────────────────
+
+function HelperLink({ helperText, helperUrl, textDim }) {
+    if (!helperText || !helperUrl) return null;
+    const displayUrl = helperUrl.replace(/^https?:\/\//, '');
+
+    return (
+        <div className="flex items-start gap-1.5 mt-2">
+            <ExternalLink
+                size={9}
+                style={{ color: textDim, flexShrink: 0, marginTop: '2px' }}
+            />
+            <p className="text-[10px] leading-snug" style={{ color: textDim }}>
+                {helperText}{' '}
+                <button
+                    onClick={() => openExternal(helperUrl)}
+                    className="font-mono transition-colors"
+                    style={{ color: textDim, textDecoration: 'underline', textUnderlineOffset: '2px' }}
+                    onMouseEnter={e => { e.currentTarget.style.color = '#a1a1aa'; }}
+                    onMouseLeave={e => { e.currentTarget.style.color = textDim; }}
+                    title={`Open ${helperUrl}`}
+                >
+                    {displayUrl}
+                </button>
+            </p>
+        </div>
+    );
+}
+
+// ── KeyField ──────────────────────────────────────────────────────────────────
+
+function KeyField({
+    label,
+    value,
+    onChange,
+    onSave,
+    placeholder = '',
+    type = 'password',
+    helperText,
+    helperUrl,
+    accentColor,
+    borderColor,
+    textPrimary,
+    textSub,
+    textDim,
+    accentDim,
+    accentBorder,
+}) {
+    const [visible, setVisible] = useState(false);
+
+    return (
+        <div>
+            <label
+                className="block text-xs tracking-wider uppercase mb-1.5"
+                style={{ color: textSub }}
+            >
+                {label}
+            </label>
+
+            <div className="flex gap-2">
+                <div className="flex-1 relative">
+                    <input
+                        type={type === 'password' ? (visible ? 'text' : 'password') : 'text'}
+                        value={value}
+                        onChange={e => onChange(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') onSave(); }}
+                        placeholder={placeholder}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="w-full px-3 py-2 rounded-lg text-[12px] font-mono outline-none"
+                        style={{
+                            background: 'rgba(0,0,0,0.75)',
+                            border: `1px solid ${borderColor}`,
+                            color: textPrimary,
+                            caretColor: accentColor,
+                            transition: 'border-color 0.15s',
+                        }}
+                        onFocus={e => {
+                            e.currentTarget.style.borderColor =
+                                `color-mix(in srgb, ${accentColor} 45%, transparent)`;
+                        }}
+                        onBlur={e => { e.currentTarget.style.borderColor = borderColor; }}
+                    />
+                    {type === 'password' && (
+                        <button
+                            onClick={() => setVisible(v => !v)}
+                            tabIndex={-1}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-80"
+                            style={{ color: textDim }}
+                            title={visible ? 'Hide' : 'Reveal'}
+                        >
+                            {visible ? <EyeOff size={13} /> : <Eye size={13} />}
+                        </button>
+                    )}
+                </div>
+
+                <button
+                    onClick={onSave}
+                    className="px-3 py-2 rounded-lg text-xs tracking-wider uppercase font-semibold transition-all hover:opacity-90 active:scale-95"
+                    style={{ background: accentDim, border: `1px solid ${accentBorder}`, color: accentColor }}
+                    title="Save"
+                >
+                    <Download size={12} />
+                </button>
+            </div>
+
+            <HelperLink helperText={helperText} helperUrl={helperUrl} textDim={textDim} />
+        </div>
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Settings Component
+// ═══════════════════════════════════════════════════════════════════════════
 
 export function Settings({
     accentColor,
@@ -56,32 +196,45 @@ export function Settings({
     onIncognitoChange,
     onClearHistory,
 }) {
-    const [showGemini, setShowGemini] = useState(false);
-    const [showOpenAI, setShowOpenAI] = useState(false);
-    const [geminiKey, setGeminiKey] = useState(config?.apiKeys?.gemini || '');
-    const [openaiKey, setOpenAIKey] = useState(config?.apiKeys?.openai || '');
+    // ── API Mode toggle ───────────────────────────────────────────────────────
+    const [apiMode, setApiMode] = useState(config?.apiMode || 'streamlined');
+
+    const handleApiModeChange = useCallback((mode) => {
+        setApiMode(mode);
+        onConfigChange({ apiMode: mode });
+    }, [onConfigChange]);
+
+    // ── Streamlined key state ─────────────────────────────────────────────────
+    const [openrouterKey, setOpenrouterKey] = useState(config?.providers?.openrouterApiKey || '');
+
+    // ── Power key state ───────────────────────────────────────────────────────
+    const [groqKey, setGroqKey] = useState(config?.providers?.groqApiKey || '');
+    const [githubKey, setGithubKey] = useState(config?.providers?.githubModelsApiKey || '');
+    const [ollamaUrl, setOllamaUrl] = useState(config?.providers?.ollamaUrl || 'http://localhost:11434');
 
     const activeProfile = config?.activeProfile || 'beast';
 
-    // Glare-aware styling
-    const panelBg = glare ? 'rgba(0,0,0,0.88)' : 'rgba(0,0,0,0.45)';
+    // ── Colour tokens ─────────────────────────────────────────────────────────
+    const panelBg = glare ? 'rgba(0,0,0,0.95)' : 'rgba(0,0,0,0.85)';
     const textPrimary = glare ? '#ffffff' : '#e4e4e7';
     const textSub = glare ? '#a1a1aa' : '#71717a';
     const textDim = glare ? '#71717a' : '#52525b';
-    const borderColor = glare ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.06)';
+    const borderColor = glare ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.10)';
     const accentDim = `color-mix(in srgb, ${accentColor} 15%, transparent)`;
     const accentBorder = `color-mix(in srgb, ${accentColor} 30%, transparent)`;
 
-    const saveKey = (provider, key) => {
-        onConfigChange({ apiKeys: { [provider]: key } });
+    const sharedFieldProps = {
+        accentColor, borderColor, textPrimary, textSub, textDim, accentDim, accentBorder,
     };
 
-    const setProfile = (profileId) => {
+    const saveProviderKey = useCallback((key, value) => {
+        onConfigChange({ providers: { [key]: value } });
+    }, [onConfigChange]);
+
+    const setProfile = useCallback((profileId) => {
         const profile = PROFILES.find(p => p.id === profileId);
-        if (profile) {
-            onConfigChange({ activeProfile: profileId, mode: profile.mode });
-        }
-    };
+        if (profile) onConfigChange({ activeProfile: profileId, mode: profile.mode });
+    }, [onConfigChange]);
 
     return (
         <div
@@ -90,9 +243,12 @@ export function Settings({
         >
             <div className="max-w-lg mx-auto px-8 py-8 space-y-10">
 
-                {/* ── Profiles ── */}
+                {/* ══ ENGINE PROFILE ══════════════════════════════════════ */}
                 <section>
-                    <h3 className="text-xs tracking-[0.3em] uppercase mb-4 flex items-center gap-2" style={{ color: textSub }}>
+                    <h3
+                        className="text-xs tracking-[0.3em] uppercase mb-4 flex items-center gap-2"
+                        style={{ color: textSub }}
+                    >
                         <Cpu size={12} /> Engine Profile
                     </h3>
                     <div className="flex flex-col gap-2">
@@ -117,7 +273,10 @@ export function Settings({
                                     )}
                                     <Icon size={14} style={{ color: active ? accentColor : textDim }} />
                                     <div className="flex flex-col">
-                                        <span className="text-xs tracking-wider uppercase font-semibold" style={{ color: active ? textPrimary : textSub }}>
+                                        <span
+                                            className="text-xs tracking-wider uppercase font-semibold"
+                                            style={{ color: active ? textPrimary : textSub }}
+                                        >
                                             {label}
                                         </span>
                                         <span className="text-xs" style={{ color: textDim }}>{sub}</span>
@@ -128,97 +287,256 @@ export function Settings({
                     </div>
                 </section>
 
-                {/* ── API Key Vault ── */}
+                {/* ══ API KEY VAULT ════════════════════════════════════════ */}
                 <section>
-                    <h3 className="text-xs tracking-[0.3em] uppercase mb-4 flex items-center gap-2" style={{ color: textSub }}>
+                    <h3
+                        className="text-xs tracking-[0.3em] uppercase mb-2 flex items-center gap-2"
+                        style={{ color: textSub }}
+                    >
                         <Key size={12} /> API Key Vault
                     </h3>
-                    <p className="text-xs mb-4 leading-relaxed" style={{ color: textDim }}>
-                        Keys are stored locally in <code className="text-xs px-1 py-0.5 rounded" style={{ background: 'rgba(255,255,255,0.08)', color: textSub }}>%APPDATA%</code> — never sent externally.
+                    <p className="text-xs mb-5 leading-relaxed" style={{ color: textDim }}>
+                        Keys are stored in{' '}
+                        <code
+                            className="text-xs px-1 py-0.5 rounded"
+                            style={{ background: 'rgba(255,255,255,0.08)', color: textSub }}
+                        >
+                            %APPDATA%/shadow-deck
+                        </code>
+                        {' '}— never transmitted externally. Strictly BYOK.
                     </p>
 
-                    {/* Gemini Key */}
-                    <div className="space-y-1.5 mb-4">
-                        <label className="text-xs tracking-wider uppercase" style={{ color: textSub }}>Google Gemini</label>
-                        <div className="flex gap-2">
-                            <div className="flex-1 relative">
-                                <input
-                                    type={showGemini ? 'text' : 'password'}
-                                    value={geminiKey}
-                                    onChange={e => setGeminiKey(e.target.value)}
-                                    placeholder="AIza..."
-                                    className="w-full px-3 py-2 rounded-lg text-[12px] font-mono outline-none"
-                                    style={{ background: 'rgba(0,0,0,0.5)', border: `1px solid ${borderColor}`, color: textPrimary }}
-                                />
-                                <button
-                                    onClick={() => setShowGemini(!showGemini)}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2"
-                                    style={{ color: textDim }}
+                    {/* ── API Mode Toggle Tabs ──────────────────────────────── */}
+                    <div
+                        className="flex rounded-xl overflow-hidden border mb-6"
+                        style={{ borderColor, background: 'rgba(0,0,0,0.4)' }}
+                    >
+                        {/* Streamlined Tab */}
+                        <button
+                            onClick={() => handleApiModeChange('streamlined')}
+                            className="flex-1 flex items-center justify-center gap-2.5 px-4 py-3.5 transition-all"
+                            style={{
+                                background: apiMode === 'streamlined' ? accentDim : 'transparent',
+                                borderRight: `1px solid ${borderColor}`,
+                            }}
+                        >
+                            <Layers
+                                size={14}
+                                style={{ color: apiMode === 'streamlined' ? accentColor : textDim }}
+                            />
+                            <div className="text-left">
+                                <div
+                                    className="text-xs font-bold tracking-wider uppercase"
+                                    style={{ color: apiMode === 'streamlined' ? accentColor : textSub }}
                                 >
-                                    {showGemini ? <EyeOff size={13} /> : <Eye size={13} />}
-                                </button>
+                                    Streamlined
+                                </div>
+                                <div className="text-[10px] mt-0.5" style={{ color: textDim }}>
+                                    One key · OpenRouter
+                                </div>
                             </div>
-                            <button
-                                onClick={() => saveKey('gemini', geminiKey)}
-                                className="px-3 py-2 rounded-lg text-xs tracking-wider uppercase font-semibold transition-all"
-                                style={{ background: accentDim, border: `1px solid ${accentBorder}`, color: accentColor }}
-                            >
-                                <Download size={12} />
-                            </button>
-                        </div>
+                            {apiMode === 'streamlined' && (
+                                <motion.div
+                                    layoutId="api-mode-dot"
+                                    className="w-1.5 h-1.5 rounded-full ml-auto shrink-0"
+                                    style={{ backgroundColor: accentColor }}
+                                />
+                            )}
+                        </button>
+
+                        {/* Power User Tab */}
+                        <button
+                            onClick={() => handleApiModeChange('power')}
+                            className="flex-1 flex items-center justify-center gap-2.5 px-4 py-3.5 transition-all"
+                            style={{
+                                background: apiMode === 'power' ? 'rgba(249,115,22,0.08)' : 'transparent',
+                            }}
+                        >
+                            <Wrench
+                                size={14}
+                                style={{ color: apiMode === 'power' ? '#f97316' : textDim }}
+                            />
+                            <div className="text-left">
+                                <div
+                                    className="text-xs font-bold tracking-wider uppercase"
+                                    style={{ color: apiMode === 'power' ? '#f97316' : textSub }}
+                                >
+                                    Power User
+                                </div>
+                                <div className="text-[10px] mt-0.5" style={{ color: textDim }}>
+                                    Groq · GitHub · Ollama
+                                </div>
+                            </div>
+                            {apiMode === 'power' && (
+                                <motion.div
+                                    layoutId="api-mode-dot"
+                                    className="w-1.5 h-1.5 rounded-full ml-auto shrink-0"
+                                    style={{ backgroundColor: '#f97316' }}
+                                />
+                            )}
+                        </button>
                     </div>
 
-                    {/* OpenAI Key */}
-                    <div className="space-y-1.5">
-                        <label className="text-xs tracking-wider uppercase" style={{ color: textSub }}>OpenAI</label>
-                        <div className="flex gap-2">
-                            <div className="flex-1 relative">
-                                <input
-                                    type={showOpenAI ? 'text' : 'password'}
-                                    value={openaiKey}
-                                    onChange={e => setOpenAIKey(e.target.value)}
-                                    placeholder="sk-..."
-                                    className="w-full px-3 py-2 rounded-lg text-[12px] font-mono outline-none"
-                                    style={{ background: 'rgba(0,0,0,0.5)', border: `1px solid ${borderColor}`, color: textPrimary }}
-                                />
-                                <button
-                                    onClick={() => setShowOpenAI(!showOpenAI)}
-                                    className="absolute right-2 top-1/2 -translate-y-1/2"
-                                    style={{ color: textDim }}
-                                >
-                                    {showOpenAI ? <EyeOff size={13} /> : <Eye size={13} />}
-                                </button>
-                            </div>
-                            <button
-                                onClick={() => saveKey('openai', openaiKey)}
-                                className="px-3 py-2 rounded-lg text-xs tracking-wider uppercase font-semibold transition-all"
-                                style={{ background: accentDim, border: `1px solid ${accentBorder}`, color: accentColor }}
+                    {/* ── Streamlined Panel ─────────────────────────────────── */}
+                    {apiMode === 'streamlined' && (
+                        <motion.div
+                            key="streamlined"
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 6 }}
+                            transition={{ duration: 0.18 }}
+                        >
+                            <div
+                                className="p-4 rounded-xl border"
+                                style={{ borderColor: `color-mix(in srgb, ${accentColor} 25%, transparent)`, background: `color-mix(in srgb, ${accentColor} 5%, rgba(0,0,0,0.4))` }}
                             >
-                                <Download size={12} />
-                            </button>
-                        </div>
-                    </div>
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Layers size={12} style={{ color: accentColor }} />
+                                    <span className="text-xs font-bold tracking-wider uppercase" style={{ color: accentColor }}>
+                                        OpenRouter
+                                    </span>
+                                    <span className="text-[10px] font-mono ml-auto" style={{ color: textDim }}>
+                                        Free tier · all models
+                                    </span>
+                                </div>
+                                <KeyField
+                                    label="API Key"
+                                    value={openrouterKey}
+                                    onChange={setOpenrouterKey}
+                                    onSave={() => saveProviderKey('openrouterApiKey', openrouterKey)}
+                                    placeholder="sk-or-..."
+                                    type="password"
+                                    helperText="Get your free key at:"
+                                    helperUrl="https://openrouter.ai/keys"
+                                    {...sharedFieldProps}
+                                />
+                            </div>
+                        </motion.div>
+                    )}
+
+                    {/* ── Power User Panel ──────────────────────────────────── */}
+                    {apiMode === 'power' && (
+                        <motion.div
+                            key="power"
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 6 }}
+                            transition={{ duration: 0.18 }}
+                            className="space-y-4"
+                        >
+                            {/* Groq */}
+                            <div
+                                className="p-4 rounded-xl border"
+                                style={{ borderColor, background: 'rgba(34,197,94,0.04)' }}
+                            >
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Zap size={12} style={{ color: '#22c55e' }} />
+                                    <span className="text-xs font-bold tracking-wider uppercase" style={{ color: '#22c55e' }}>
+                                        Groq
+                                    </span>
+                                    <span className="text-[10px] font-mono ml-auto" style={{ color: textDim }}>
+                                        14,400 RPD free
+                                    </span>
+                                </div>
+                                <KeyField
+                                    label="API Key"
+                                    value={groqKey}
+                                    onChange={setGroqKey}
+                                    onSave={() => saveProviderKey('groqApiKey', groqKey)}
+                                    placeholder="gsk_..."
+                                    type="password"
+                                    helperText="Get your free 14,400 RPD key at:"
+                                    helperUrl="https://console.groq.com/keys"
+                                    {...sharedFieldProps}
+                                />
+                            </div>
+
+                            {/* GitHub Models */}
+                            <div
+                                className="p-4 rounded-xl border"
+                                style={{ borderColor, background: 'rgba(167,139,250,0.04)' }}
+                            >
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Cloud size={12} style={{ color: '#a78bfa' }} />
+                                    <span className="text-xs font-bold tracking-wider uppercase" style={{ color: '#a78bfa' }}>
+                                        GitHub Models
+                                    </span>
+                                    <span className="text-[10px] font-mono ml-auto" style={{ color: textDim }}>
+                                        50–150 RPD free
+                                    </span>
+                                </div>
+                                <KeyField
+                                    label="Personal Access Token"
+                                    value={githubKey}
+                                    onChange={setGithubKey}
+                                    onSave={() => saveProviderKey('githubModelsApiKey', githubKey)}
+                                    placeholder="ghp_..."
+                                    type="password"
+                                    helperText="Generate a classic Personal Access Token at:"
+                                    helperUrl="https://github.com/settings/tokens"
+                                    {...sharedFieldProps}
+                                />
+                            </div>
+
+                            {/* Ollama */}
+                            <div
+                                className="p-4 rounded-xl border"
+                                style={{ borderColor, background: 'rgba(249,115,22,0.04)' }}
+                            >
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Server size={12} style={{ color: '#f97316' }} />
+                                    <span className="text-xs font-bold tracking-wider uppercase" style={{ color: '#f97316' }}>
+                                        Local Ollama
+                                    </span>
+                                    <span className="text-[10px] font-mono ml-auto" style={{ color: textDim }}>
+                                        Unlimited · offline
+                                    </span>
+                                </div>
+                                <KeyField
+                                    label="Server URL"
+                                    value={ollamaUrl}
+                                    onChange={setOllamaUrl}
+                                    onSave={() => saveProviderKey('ollamaUrl', ollamaUrl)}
+                                    placeholder="http://localhost:11434"
+                                    type="url"
+                                    helperText="Download the local engine at:"
+                                    helperUrl="https://ollama.com/download"
+                                    {...sharedFieldProps}
+                                />
+                            </div>
+                        </motion.div>
+                    )}
                 </section>
 
-                {/* ── Privacy ── */}
+                {/* ══ PRIVACY ══════════════════════════════════════════════ */}
                 <section>
-                    <h3 className="text-xs tracking-[0.3em] uppercase mb-4 flex items-center gap-2" style={{ color: textSub }}>
+                    <h3
+                        className="text-xs tracking-[0.3em] uppercase mb-4 flex items-center gap-2"
+                        style={{ color: textSub }}
+                    >
                         <Shield size={12} /> Privacy
                     </h3>
 
-                    {/* Incognito Toggle */}
-                    <div className="flex items-center justify-between px-4 py-3 rounded-lg border" style={{ borderColor, background: 'rgba(255,255,255,0.03)' }}>
+                    <div
+                        className="flex items-center justify-between px-4 py-3 rounded-lg border"
+                        style={{ borderColor, background: 'rgba(255,255,255,0.03)' }}
+                    >
                         <div className="flex flex-col">
-                            <span className="text-xs tracking-wider uppercase font-semibold" style={{ color: textPrimary }}>
+                            <span
+                                className="text-xs tracking-wider uppercase font-semibold"
+                                style={{ color: textPrimary }}
+                            >
                                 Incognito Mode
                             </span>
                             <span className="text-xs" style={{ color: textDim }}>
-                                {incognito ? 'Logs only live in memory — nothing saved to disk.' : 'Analysis history is persisted to disk.'}
+                                {incognito
+                                    ? 'Logs only live in memory — nothing saved to disk.'
+                                    : 'Analysis history is persisted to disk.'}
                             </span>
                         </div>
                         <button
                             onClick={() => onIncognitoChange(!incognito)}
-                            className="relative w-10 h-5 rounded-full transition-colors"
+                            className="relative w-10 h-5 rounded-full transition-colors shrink-0 ml-4"
                             style={{
                                 backgroundColor: incognito ? accentColor : 'rgba(255,255,255,0.12)',
                                 boxShadow: incognito ? `0 0 10px ${accentColor}50` : 'none',
@@ -232,7 +550,6 @@ export function Settings({
                         </button>
                     </div>
 
-                    {/* Clear History */}
                     <button
                         onClick={onClearHistory}
                         className="mt-3 flex items-center gap-2 px-4 py-2.5 rounded-lg border text-left transition-all hover:border-red-500/40 hover:bg-red-500/10 group"
@@ -245,9 +562,11 @@ export function Settings({
                     </button>
                 </section>
 
-                {/* ── Accent Color ── */}
+                {/* ══ ACCENT COLOR ══════════════════════════════════════════ */}
                 <section>
-                    <h3 className="text-xs tracking-[0.3em] uppercase mb-3" style={{ color: textSub }}>Accent Color</h3>
+                    <h3 className="text-xs tracking-[0.3em] uppercase mb-3" style={{ color: textSub }}>
+                        Accent Color
+                    </h3>
                     <div className="flex flex-wrap gap-3">
                         {COLOR_PRESETS.map((hex) => (
                             <button
@@ -264,9 +583,11 @@ export function Settings({
                     </div>
                 </section>
 
-                {/* ── Background ── */}
+                {/* ══ BACKGROUND ════════════════════════════════════════════ */}
                 <section>
-                    <h3 className="text-xs tracking-[0.3em] uppercase mb-3" style={{ color: textSub }}>Background</h3>
+                    <h3 className="text-xs tracking-[0.3em] uppercase mb-3" style={{ color: textSub }}>
+                        Background
+                    </h3>
                     <div className="flex flex-col gap-2">
                         {BACKGROUNDS.map(({ id, label }) => (
                             <button

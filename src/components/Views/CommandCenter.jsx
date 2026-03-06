@@ -14,7 +14,7 @@
 //
 //  LAYOUT:
 //    ┌─────────────────────────────────────────────────────┐
-//    │  TOP BAR: [ 🐛 Run Inquisitor ] [ 📜 Audit Licenses ] [ 🚀 Generate Commit ] │
+//    │  TOP BAR: Status label + Abort/Export/Clear controls                        │
 //    ├──────────────────────┬──────────────────────────────┤
 //    │  LEFT PANEL          │  MAIN PANEL                  │
 //    │  (Target Queue)      │  (TerminalLog Stream)         │
@@ -28,7 +28,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    Bug, ScrollText, Rocket, FolderOpen,
+    FolderOpen,
     X, Loader2, CheckCircle2, AlertCircle,
     ChevronRight, Square, Download
 } from 'lucide-react';
@@ -96,34 +96,6 @@ function downloadReport(results, projectRoot) {
     URL.revokeObjectURL(url);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Sub-component: TriggerButton
-// ─────────────────────────────────────────────────────────────────────────────
-function TriggerButton({ icon: Icon, label, color, onClick, disabled, isActive }) {
-    return (
-        <motion.button
-            onClick={onClick}
-            disabled={disabled}
-            whileHover={disabled ? {} : { scale: 1.03 }}
-            whileTap={disabled ? {} : { scale: 0.97 }}
-            className={cn(
-                'relative flex items-center gap-2.5 px-5 py-2.5 rounded-lg',
-                'text-sm font-semibold tracking-wide transition-all duration-150',
-                'border focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
-                isActive
-                    ? `${color.activeBg} ${color.activeBorder} ${color.text} ring-2 ${color.ring}`
-                    : `bg-zinc-900/80 border-white/10 text-zinc-300 hover:${color.hoverBg} hover:${color.hoverBorder} hover:${color.text}`,
-                disabled && 'opacity-40 cursor-not-allowed',
-            )}
-        >
-            {isActive
-                ? <Loader2 size={15} className="animate-spin shrink-0" />
-                : <Icon size={15} className="shrink-0" />
-            }
-            <span>{label}</span>
-        </motion.button>
-    );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Sub-component: TargetItem (left panel file row)
@@ -235,174 +207,7 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
         };
     }, [dispatch]);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TRIGGER 1: Run Inquisitor
-    //  Opens the Electron directory picker, traverses the tree,
-    //  and feeds all source files into TaskQueueEngine.
-    // ─────────────────────────────────────────────────────────────────────────
-    const handleRunInquisitor = useCallback(async () => {
-        if (isRunning) return;
 
-        let targetRoot = projectRoot;
-
-        if (window.require) {
-            try {
-                const { ipcRenderer } = window.require('electron');
-                const result = await ipcRenderer.invoke('dialog:openDirectory');
-                if (!result || result.canceled || !result.filePaths?.[0]) {
-                    pushLog('WARNING', '[INQUISITOR] Directory picker cancelled.');
-                    return;
-                }
-                targetRoot = result.filePaths[0];
-
-                // Register the chosen path as active project with the bridge
-                await fetch(`${BRIDGE}/project/connect`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: targetRoot }),
-                }).catch((err) => { console.error('Project connect failed', err); });
-
-            } catch (err) {
-                if (!targetRoot) {
-                    pushLog('ERROR', `[INQUISITOR] Directory picker failed: ${err.message}`);
-                    return;
-                }
-            }
-        }
-
-        if (!targetRoot) {
-            pushLog('ERROR', '[INQUISITOR] No project root. Connect a project first.');
-            return;
-        }
-
-        clearLogs();
-        setQueue([]);
-        setFileStatuses({});
-        setActiveFile(null);
-        setCompletedResults(null); // FIX #1: clear previous report
-        lastScannedRootRef.current = targetRoot;
-
-        pushLog('INFO', `[INQUISITOR] Fetching file tree from: ${targetRoot}`);
-        const files = await fetchProjectTree(targetRoot);
-
-        if (!files.length) {
-            pushLog('WARNING', '[INQUISITOR] No source files found in selected directory.');
-            return;
-        }
-
-        setQueue(files);
-        setFileStatuses(Object.fromEntries(files.map(f => [f, 'pending'])));
-        pushLog('INFO', `[INQUISITOR] ${files.length} source file(s) queued.`);
-
-        // ── Wire up the TaskQueueEngine ──────────────────────────────────────────
-        const engine = new TaskQueueEngine({
-            projectRoot: targetRoot,
-            dispatch,
-            pushLog,
-
-            onProgress: (current, total, filePath) => {
-                // Mark the file as 'running' when it starts
-                setActiveFile(filePath);
-                setFileStatuses(prev => ({ ...prev, [filePath]: 'running' }));
-            },
-
-            // FIX #6: Update each file's icon the instant it resolves —
-            // no more spinning loaders on files that are already done.
-            onFileComplete: (filePath, status) => {
-                setActiveFile(prev => (prev === filePath ? null : prev));
-                setFileStatuses(prev => ({ ...prev, [filePath]: status }));
-            },
-
-            onComplete: (results) => {
-                // onFileComplete has already updated individual statuses,
-                // but we do a final bulk-set here as a consistency guarantee.
-                setActiveFile(null);
-                setFileStatuses(
-                    Object.fromEntries(results.map(r => [r.filePath, r.status]))
-                );
-
-                // FIX #1: Store results so the Export Report button can appear
-                setCompletedResults(results);
-
-                // FIX #3: Persist the scan to the history vault in %APPDATA%
-                const clean = results.filter(r => r.status === 'CLEAN').length;
-                const dirty = results.filter(r => r.status === 'DIRTY').length;
-                fetch(`${BRIDGE}/store/history`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        id: `inquisitor-${Date.now()}`,
-                        type: 'ANALYSIS',
-                        message: `Inquisitor scan: ${results.length} files — ${dirty} DIRTY · ${clean} CLEAN`,
-                        timestamp: new Date().toISOString(),
-                        projectRoot: targetRoot,
-                        data: results,
-                    }),
-                }).catch(() => {
-                    // Non-fatal — history save is best-effort
-                });
-            },
-        });
-
-        queueEngineRef.current = engine;
-        await engine.run(files);
-
-    }, [isRunning, projectRoot, dispatch, pushLog, clearLogs]);
-
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TRIGGER 2: Audit Licenses
-    //  Fetches package.json and sends it to The Lawyer.
-    // ─────────────────────────────────────────────────────────────────────────
-    const handleAuditLicenses = useCallback(async () => {
-        if (isRunning) return;
-        if (!projectRoot && !isConnected) {
-            pushLog('ERROR', '[LAWYER] No project connected. Use Settings to connect one.');
-            return;
-        }
-        clearLogs();
-        setQueue(['package.json']);
-        setCommitMessage('');
-        setCompletedResults(null);
-        await dispatch(AGENT_TYPES.LAWYER, {});
-        setQueue([]);
-    }, [isRunning, projectRoot, isConnected, dispatch, pushLog, clearLogs]);
-
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TRIGGER 3: Generate Commit
-    //  Fetches the git diff and sends it to The Herald.
-    // ─────────────────────────────────────────────────────────────────────────
-    const handleGenerateCommit = useCallback(async () => {
-        if (isRunning) return;
-        if (!projectRoot && !isConnected) {
-            pushLog('ERROR', '[HERALD] No project connected. Use Settings to connect one.');
-            return;
-        }
-        clearLogs();
-        setQueue(['git diff']);
-        setCommitMessage('');
-        setCompletedResults(null);
-
-        const result = await dispatch(AGENT_TYPES.HERALD, {});
-
-        if (result) {
-            // FIX #4: qwen3.5:9b is an instruct model and will prefix its output
-            // with conversational filler ("Here is the commit message:", etc.).
-            // We armour the extraction with a strict Conventional Commits regex
-            // that ignores every line that doesn't match the required format.
-            // Only if no valid commit line is found do we fall back to the first
-            // non-empty line (which handles edge-case models that get it right).
-            const match = result.match(CONVENTIONAL_COMMIT_REGEX);
-            if (match) {
-                setCommitMessage(match[0].trim());
-            } else {
-                const firstLine = result.split('\n').find(l => l.trim());
-                if (firstLine) setCommitMessage(firstLine.trim());
-            }
-        }
-        setQueue([]);
-    }, [isRunning, projectRoot, isConnected, dispatch, pushLog, clearLogs]);
 
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -446,53 +251,6 @@ export function CommandCenter({ projectRoot = null, isConnected = false }) {
 
                 {/* ── Trigger Buttons ──────────────────────────────────────────── */}
                 <div className="flex items-center gap-2 flex-wrap">
-                    <TriggerButton
-                        icon={Bug}
-                        label="Run Inquisitor"
-                        color={{
-                            activeBg: 'bg-orange-950/40',
-                            activeBorder: 'border-orange-500/40',
-                            text: 'text-orange-400',
-                            hoverBg: 'bg-orange-950/20',
-                            hoverBorder: 'border-orange-500/20',
-                            ring: 'ring-orange-500/30',
-                        }}
-                        onClick={handleRunInquisitor}
-                        disabled={anyTaskActive}
-                        isActive={isRunning && activeTask === AGENT_TYPES.INQUISITOR}
-                    />
-
-                    <TriggerButton
-                        icon={ScrollText}
-                        label="Audit Licenses"
-                        color={{
-                            activeBg: 'bg-violet-950/40',
-                            activeBorder: 'border-violet-500/40',
-                            text: 'text-violet-400',
-                            hoverBg: 'bg-violet-950/20',
-                            hoverBorder: 'border-violet-500/20',
-                            ring: 'ring-violet-500/30',
-                        }}
-                        onClick={handleAuditLicenses}
-                        disabled={anyTaskActive}
-                        isActive={isRunning && activeTask === AGENT_TYPES.LAWYER}
-                    />
-
-                    <TriggerButton
-                        icon={Rocket}
-                        label="Generate Commit"
-                        color={{
-                            activeBg: 'bg-sky-950/40',
-                            activeBorder: 'border-sky-500/40',
-                            text: 'text-sky-400',
-                            hoverBg: 'bg-sky-950/20',
-                            hoverBorder: 'border-sky-500/20',
-                            ring: 'ring-sky-500/30',
-                        }}
-                        onClick={handleGenerateCommit}
-                        disabled={anyTaskActive}
-                        isActive={isRunning && activeTask === AGENT_TYPES.HERALD}
-                    />
 
                     {/* ── Abort button (only visible when running) ─────────────── */}
                     <AnimatePresence>
