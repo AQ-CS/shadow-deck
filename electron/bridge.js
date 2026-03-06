@@ -304,12 +304,19 @@ export function startBridge(mainWindow, userDataPath) {
         const rel = req.query.rel;
         const abs = req.query.abs;
 
+        const resolvedRoot = path.resolve(activeProjectPath);
+        // Ensure the path ends with a separator to prevent prefix bypass (e.g. /app vs /app-secret)
+        const rootWithSeparator = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+
         let absPath;
         if (abs) {
             absPath = path.resolve(abs);
+            if (!absPath.startsWith(rootWithSeparator) && absPath !== resolvedRoot) {
+                return res.status(403).json({ error: 'Path traversal rejected' });
+            }
         } else if (rel) {
             absPath = path.resolve(activeProjectPath, String(rel));
-            if (!absPath.startsWith(path.resolve(activeProjectPath))) {
+            if (!absPath.startsWith(rootWithSeparator) && absPath !== resolvedRoot) {
                 return res.status(403).json({ error: 'Path traversal rejected' });
             }
         } else {
