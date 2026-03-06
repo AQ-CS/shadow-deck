@@ -51,7 +51,7 @@ export default function App() {
   });
 
   // ── App state ─────────────────────────────────────────────────────────────
-  const [activeView, setActiveView] = useState('chat');
+  const [activeView, setActiveView] = useState('lab');
   const [activeProject, setActiveProject] = useState(null);
   const [connectionMode, setConnectionMode] = useState(null); // 'ide' | 'manual' | null
   const [bridgeStatus, setBridgeStatus] = useState('online');
