@@ -30,11 +30,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     FolderOpen,
     X, Loader2, CheckCircle2, AlertCircle,
-    ChevronRight, Square, Download
+    ChevronRight, Square, Download, Rocket
 } from 'lucide-react';
 import { TerminalLog } from '../arsenal/TerminalLog';
 import { useChatEngine } from '../../hooks/useChatEngine';
-import { TaskQueueEngine } from '../../utils/TaskQueueEngine';
 import { AGENT_TYPES } from '../../agents/prompts';
 import { cn } from '../../lib/utils';
 
