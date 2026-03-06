@@ -30,11 +30,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     FolderOpen,
     X, Loader2, CheckCircle2, AlertCircle,
-    ChevronRight, Square, Download
+    ChevronRight, Square, Download, Rocket
 } from 'lucide-react';
 import { TerminalLog } from '../arsenal/TerminalLog';
 import { useChatEngine } from '../../hooks/useChatEngine';
-import { TaskQueueEngine } from '../../utils/TaskQueueEngine';
 import { AGENT_TYPES } from '../../agents/prompts';
 import { cn } from '../../lib/utils';
 
@@ -49,6 +48,9 @@ const CONVENTIONAL_COMMIT_REGEX =
     /^(feat|fix|chore|docs|style|refactor|test|perf|ci|build|revert)(\([^)]+\))?!?:\s+.+$/m;
 
 // ── Fetch the project file tree from the bridge ───────────────────────────────
+const SKIP_FILES = /node_modules|dist|build|\.min\.|package-lock|yarn\.lock|pnpm-lock/;
+const CODE_EXTENSIONS = /\.(js|jsx|ts|tsx|mjs|cjs|py|go|rs|rb|java|kt|swift)$/;
+
 async function fetchProjectTree(projectRoot) {
     try {
         const res = await fetch(`${BRIDGE}/project/tree`, {
@@ -58,11 +60,12 @@ async function fetchProjectTree(projectRoot) {
         if (!res.ok) return [];
         const data = await res.json();
         // Return only source code files — skip lock files, dist, node_modules
-        const SKIP = /node_modules|dist|build|\.min\.|package-lock|yarn\.lock|pnpm-lock/;
-        const CODE = /\.(js|jsx|ts|tsx|mjs|cjs|py|go|rs|rb|java|kt|swift)$/;
-        return (data.entries || [])
-            .filter(e => e.type === 'file' && CODE.test(e.name) && !SKIP.test(e.relative || ''))
-            .map(e => e.relative || e.name);
+        return (data.entries || []).reduce((acc, e) => {
+            if (e.type === 'file' && CODE_EXTENSIONS.test(e.name) && !SKIP_FILES.test(e.relative || '')) {
+                acc.push(e.relative || e.name);
+            }
+            return acc;
+        }, []);
     } catch {
         return [];
     }
