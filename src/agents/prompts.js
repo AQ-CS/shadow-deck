@@ -5,10 +5,11 @@
 //  THE COUNCIL (6 Agents):
 //    THE INQUISITOR  (File Linter)      — Groq  / llama-3.3-70b-versatile
 //    THE FORGER      (Unit Tests)       — Groq  / llama-3.3-70b-versatile
-//    THE HERALD      (Commit Gen)       — GitHub/ gpt-4o
-//    THE ARCHITECT   (Deep Refactor)    — GitHub/ gpt-4o
-//    THE VAULT GUARD (Secret Scanner)   — Ollama/ qwen2.5-coder:7b
-//    THE LAWYER      (License Audit)    — Ollama/ qwen2.5-coder:7b
+//    THE HERALD      (Commit Gen)       — Groq  / llama-3.3-70b-versatile
+//    THE ARCHITECT   (Deep Refactor)    — Groq  / llama-3.3-70b-versatile
+//    THE VAULT GUARD (Secret Scanner)   — Groq  / llama-3.3-70b-versatile
+//    THE LAWYER      (License Audit)    — Groq  / llama-3.3-70b-versatile
+//    THE ORACLE      (General Chat)     — Groq  / llama-3.3-70b-versatile
 //
 //  v6 CHANGES:
 //    - ADDED: SURGICAL_PATCH_RULES — forces IDE-compiler output format
@@ -25,6 +26,7 @@ export const AGENT_TYPES = {
   ARCHITECT: 'ARCHITECT',
   VAULT_GUARD: 'VAULT_GUARD',
   LAWYER: 'LAWYER',
+  ORACLE: 'ORACLE',
 };
 
 // ── Provider Assignment ───────────────────────────────────────────────────────
@@ -32,10 +34,11 @@ export const AGENT_TYPES = {
 export const AGENT_PROVIDER = {
   [AGENT_TYPES.INQUISITOR]: 'groq',
   [AGENT_TYPES.FORGER]: 'groq',
-  [AGENT_TYPES.HERALD]: 'github',
-  [AGENT_TYPES.ARCHITECT]: 'github',
-  [AGENT_TYPES.VAULT_GUARD]: 'ollama',
-  [AGENT_TYPES.LAWYER]: 'ollama',
+  [AGENT_TYPES.HERALD]: 'groq',
+  [AGENT_TYPES.ARCHITECT]: 'groq',
+  [AGENT_TYPES.VAULT_GUARD]: 'groq',
+  [AGENT_TYPES.LAWYER]: 'groq',
+  [AGENT_TYPES.ORACLE]: 'groq',
 };
 
 // ── Default Model Per Agent ───────────────────────────────────────────────────
@@ -43,10 +46,11 @@ export const AGENT_PROVIDER = {
 export const AGENT_MODELS = {
   [AGENT_TYPES.INQUISITOR]: 'llama-3.3-70b-versatile',
   [AGENT_TYPES.FORGER]: 'llama-3.3-70b-versatile',
-  [AGENT_TYPES.HERALD]: 'gpt-4o',
-  [AGENT_TYPES.ARCHITECT]: 'gpt-4o',
-  [AGENT_TYPES.VAULT_GUARD]: 'qwen2.5-coder:7b',
-  [AGENT_TYPES.LAWYER]: 'qwen2.5-coder:7b',
+  [AGENT_TYPES.HERALD]: 'llama-3.3-70b-versatile',
+  [AGENT_TYPES.ARCHITECT]: 'llama-3.3-70b-versatile',
+  [AGENT_TYPES.VAULT_GUARD]: 'llama-3.3-70b-versatile',
+  [AGENT_TYPES.LAWYER]: 'llama-3.3-70b-versatile',
+  [AGENT_TYPES.ORACLE]: 'llama-3.3-70b-versatile',
 };
 
 // ── Available Models Per Provider (for PreFlight dropdown) ────────────────────
@@ -115,6 +119,8 @@ export const AGENT_DESCRIPTIONS = {
     'Scans for hardcoded secrets, API keys, tokens, and credentials. Runs fully offline.',
   [AGENT_TYPES.LAWYER]:
     'Reads package.json and flags risky copyleft / GPL dependencies. Runs fully offline.',
+  [AGENT_TYPES.ORACLE]:
+    'A general-purpose programming assistant. Explains code, answers questions, and brainstorms solutions.',
 };
 
 // ── Scope Labels (for PreFlight Modal) ────────────────────────────────────────
@@ -126,6 +132,7 @@ export const AGENT_SCOPE_LABEL = {
   [AGENT_TYPES.ARCHITECT]: 'Active File',
   [AGENT_TYPES.VAULT_GUARD]: 'Full Project Scan',
   [AGENT_TYPES.LAWYER]: 'package.json',
+  [AGENT_TYPES.ORACLE]: 'Conversational',
 };
 
 
@@ -359,6 +366,31 @@ If invalid JSON input → output exactly: {"error":"INVALID_INPUT"}
 Sort: HIGH_RISK first, then alphabetically.
 `;
 
+// ── 7. THE ORACLE — General Programming Assistant ─────────────────────────────
+
+export const ORACLE_SYSTEM = `\
+You are THE ORACLE — a highly specialized programming assistant and senior software engineer.
+You are part of the ShadowDeck Council. Your goal is to provide clear, actionable, and expert advice.
+
+════════════════════════════════════════════
+YOUR CAPABILITIES:
+════════════════════════════════════════════
+- Explaining complex code logic and architectural patterns
+- Identifying performance bottlenecks and suggesting optimizations
+- Brainstorming implementation strategies for new features
+- Debugging obscure errors and edge cases
+- Translating between programming languages
+
+════════════════════════════════════════════
+OUTPUT RULES — ABSOLUTE LAW:
+════════════════════════════════════════════
+- Be concise but thorough.
+- Use markdown for all code blocks.
+- If suggesting code changes, use clear snippets.
+- Avoid excessive jargon unless necessary for precision.
+- Maintain a professional, helpful, and objective tone.
+`;
+
 // ── System Prompt Registry ─────────────────────────────────────────────────────
 
 const SYSTEM_PROMPTS = {
@@ -368,6 +400,7 @@ const SYSTEM_PROMPTS = {
   [AGENT_TYPES.ARCHITECT]: ARCHITECT_SYSTEM,
   [AGENT_TYPES.VAULT_GUARD]: VAULT_GUARD_SYSTEM,
   [AGENT_TYPES.LAWYER]: LAWYER_SYSTEM,
+  [AGENT_TYPES.ORACLE]: ORACLE_SYSTEM,
 };
 
 

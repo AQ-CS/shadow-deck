@@ -83,6 +83,13 @@ const COUNCIL = [
         icon: '⚖️',
         color: '#eab308',
     },
+    {
+        key: AGENT_TYPES.ORACLE,
+        label: 'The Oracle',
+        role: 'General Assistant',
+        icon: '🔮',
+        color: '#a855f7',
+    },
 ];
 
 // ── Provider Badge ─────────────────────────────────────────────────────────────
@@ -321,14 +328,15 @@ export function Laboratory({
 
     // ── Execute (called by PreFlight confirm) ─────────────────────────────────
     // UX Flow: dispatch → close modal → redirect to CommandCenter log stream
-    const handleExecute = useCallback(async (provider, model) => {
+    const handleExecute = useCallback(async (provider, model, scopeData = {}) => {
         if (!preFlightKey) return;
 
-        const fileAgents = [AGENT_TYPES.INQUISITOR, AGENT_TYPES.FORGER, AGENT_TYPES.ARCHITECT];
-        const payload = fileAgents.includes(preFlightKey) ? {} : {};
-
-        // Dispatch the agent task
-        dispatch(preFlightKey, payload, { provider, model });
+        // Dispatch the agent task with scope info
+        dispatch(preFlightKey, {
+            scopeMode: scopeData.scopeMode,
+            filePath: scopeData.selectedFile?.path,
+            fileName: scopeData.selectedFile?.name
+        }, { provider, model });
 
         // Close the Pre-Flight Modal immediately
         setPreFlightKey(null);

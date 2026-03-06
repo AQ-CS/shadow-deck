@@ -441,13 +441,44 @@ export function useChatEngine({ projectRoot = null, onBridgeError = null } = {})
 
                 case AGENT_TYPES.INQUISITOR:
                 case AGENT_TYPES.FORGER:
-                case AGENT_TYPES.ARCHITECT: {
-                    if (!payload.content) {
-                        pushLog('ERROR', `[${agentType}] No file content provided.`);
-                        return '';
+                case AGENT_TYPES.ARCHITECT:
+                case AGENT_TYPES.ORACLE: {
+                    const scopeMode = payload.scopeMode || 'file';
+                    const filePath = payload.filePath;
+
+                    if (scopeMode === 'file') {
+                        if (!filePath) {
+                            pushLog('ERROR', `[${agentType}] No file selected for scope.`);
+                            return '';
+                        }
+                        pushLog('INFO', `[${agentType}] Reading file: ${filePath}…`);
+                        const fileData = await (async () => {
+                            const res = await fetch(`${BRIDGE}/project/file?abs=${encodeURIComponent(filePath)}`, { cache: 'no-store' });
+                            return await res.json();
+                        })();
+
+                        if (fileData.error) {
+                            pushLog('ERROR', `[${agentType}] ${fileData.error}`);
+                            return '';
+                        }
+                        rawContent = fileData.content;
+                        filename = payload.fileName || filePath.split(/[\\/]/).pop();
+                    } else {
+                        // Project scope
+                        if (!projectRoot) {
+                            pushLog('ERROR', `[${agentType}] No project root set. Context restricted.`);
+                            return '';
+                        }
+                        pushLog('INFO', `[${agentType}] Mapping project-wide context…`);
+                        const treeRes = await fetch(`${BRIDGE}/project/tree`, { cache: 'no-store' });
+                        const treeData = await treeRes.json();
+
+                        // Build a concise project summary
+                        const fileList = (treeData.entries || []).filter(e => e.type === 'file').map(e => e.rel).join('\n');
+                        rawContent = `PROJECT REPO MAP:\n${fileList}\n\n(Note: Agent is currently operating with global project awareness but limited code depth for files not explicitly selected.)`;
+                        filename = 'project-context';
                     }
-                    rawContent = payload.content;
-                    filename = payload.filePath || 'unknown';
+
                     pushLog('INFO', `[${agentType}] Processing ${filename}…`);
                     break;
                 }

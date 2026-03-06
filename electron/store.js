@@ -23,8 +23,8 @@ function getTodayDateStr() {
 // ── Schema Defaults ────────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG = {
-    mode: 'hybrid',
-    activeProfile: 'beast',
+    mode: 'cloud',
+    activeProfile: 'cloud',
 
     // ── API Mode (Two-Path Toggle) ────────────────────────────────
     // 'streamlined' — single OpenRouter key routes all cloud agents

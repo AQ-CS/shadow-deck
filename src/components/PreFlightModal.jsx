@@ -57,6 +57,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
     X, Rocket, AlertTriangle, ChevronDown,
     Zap, Cloud, Server, Activity, Settings2,
+    FileCode, Globe, FileSearch
 } from 'lucide-react';
 import {
     AGENT_TYPES,
@@ -80,6 +81,7 @@ const AGENT_META = {
     [AGENT_TYPES.ARCHITECT]: { label: 'The Architect', icon: '🏗️', color: '#818cf8' },
     [AGENT_TYPES.VAULT_GUARD]: { label: 'The Vault Guard', icon: '🔒', color: '#4ade80' },
     [AGENT_TYPES.LAWYER]: { label: 'The Lawyer', icon: '⚖️', color: '#eab308' },
+    [AGENT_TYPES.ORACLE]: { label: 'The Oracle', icon: '🔮', color: '#a855f7' },
 };
 
 const PROVIDER_ICONS = { groq: Zap, github: Cloud, ollama: Server };
@@ -271,6 +273,11 @@ export function PreFlightModal({
     const [selectedModel, setSelectedModel] = useState(defaultModel);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
+    // ── Scope selection state ────────────────────────────────────────────────
+    const [scopeMode, setScopeMode] = useState('file'); // 'file' or 'project'
+    const [selectedFile, setSelectedFile] = useState(null); // { path, name }
+    const [isPickingFile, setIsPickingFile] = useState(false);
+
     // ── Provider config snapshot (fetched once per modal open) ────────────────
     // We fetch on open — not on every render — so there are no waterfalls.
     // The snapshot is sufficient for key validation; it never needs to be live
@@ -290,6 +297,8 @@ export function PreFlightModal({
         setSelectedProvider(prov);
         setSelectedModel(model);
         setShowAdvanced(false);
+        setScopeMode('file');
+        setSelectedFile(null);
         // Reset key snapshot so stale data doesn't flash during next open
         setProviderKeys({ groqApiKey: null, githubModelsApiKey: null, ollamaUrl: null });
 
@@ -341,9 +350,10 @@ export function PreFlightModal({
     // ── Execute ───────────────────────────────────────────────────────────────
     const handleExecute = useCallback(() => {
         if (isMissingKey) return;
-        onExecute?.(selectedProvider, selectedModel);
+        if (scopeMode === 'file' && !selectedFile) return;
+        onExecute?.(selectedProvider, selectedModel, { scopeMode, selectedFile });
         onClose?.();
-    }, [isMissingKey, onExecute, onClose, selectedProvider, selectedModel]);
+    }, [isMissingKey, onExecute, onClose, selectedProvider, selectedModel, scopeMode, selectedFile]);
 
     // ── Keyboard shortcuts: ⌘↵ execute · Esc close ───────────────────────────
     useEffect(() => {
@@ -468,31 +478,78 @@ export function PreFlightModal({
                                         {description}
                                     </p>
 
-                                    {/* Scope */}
-                                    <div
-                                        className="flex items-center justify-between px-4 py-3 rounded-xl border"
-                                        style={{ borderColor, background: 'rgba(255,255,255,0.03)' }}
-                                    >
-                                        <div>
-                                            <div
-                                                className="text-[10px] uppercase tracking-widest mb-1"
-                                                style={{ color: textDim }}
-                                            >
-                                                Scope
-                                            </div>
-                                            <div
-                                                className="text-xs font-semibold font-mono"
-                                                style={{ color: textPrimary }}
-                                            >
-                                                {scopeText}
-                                                {scopeCount !== null && (
-                                                    <span className="ml-2 text-[10px]" style={{ color: textDim }}>
-                                                        ({scopeCount} file{scopeCount !== 1 ? 's' : ''})
-                                                    </span>
-                                                )}
+                                    {/* ── Scope Selection ── */}
+                                    <div className="space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] uppercase tracking-widest text-[#71717a] font-bold">Target Scope</span>
+                                            <div className="flex gap-1 bg-black/40 p-0.5 rounded-lg border border-white/5">
+                                                <button
+                                                    onClick={() => setScopeMode('file')}
+                                                    className={`px-2 py-1 rounded text-[10px] font-bold uppercase transition-all ${scopeMode === 'file' ? 'bg-white/10 text-white' : 'text-[#52525b] hover:text-[#71717a]'}`}
+                                                >
+                                                    File
+                                                </button>
+                                                <button
+                                                    onClick={() => setScopeMode('project')}
+                                                    className={`px-2 py-1 rounded text-[10px] font-bold uppercase transition-all ${scopeMode === 'project' ? 'bg-white/10 text-white' : 'text-[#52525b] hover:text-[#71717a]'}`}
+                                                >
+                                                    Project
+                                                </button>
                                             </div>
                                         </div>
-                                        <Activity size={14} style={{ color: textDim }} />
+
+                                        {scopeMode === 'file' ? (
+                                            <motion.div
+                                                initial={{ opacity: 0, y: 5 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                className="relative flex items-center justify-between px-4 py-3 rounded-xl border border-white/5 bg-black/40"
+                                            >
+                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                    <FileCode size={13} style={{ color: selectedFile ? agentMeta.color : '#52525b' }} />
+                                                    <div className="min-w-0">
+                                                        <div className="text-[10px] uppercase tracking-widest mb-0.5 text-[#71717a]">
+                                                            {selectedFile ? 'Selected File' : 'No file selected'}
+                                                        </div>
+                                                        <div className="text-xs font-mono truncate" style={{ color: selectedFile ? '#fff' : '#52525b' }}>
+                                                            {selectedFile ? selectedFile.name : 'Choose a file to analyze...'}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    onClick={async () => {
+                                                        const { ipcRenderer } = window.require('electron');
+                                                        setIsPickingFile(true);
+                                                        const result = await ipcRenderer.invoke('dialog:openFile');
+                                                        setIsPickingFile(false);
+                                                        if (!result.canceled && result.filePaths.length > 0) {
+                                                            const filePath = result.filePaths[0];
+                                                            const fileName = filePath.split(/[\\/]/).pop();
+                                                            setSelectedFile({ path: filePath, name: fileName });
+                                                        }
+                                                    }}
+                                                    disabled={isPickingFile}
+                                                    className="shrink-0 px-2 py-1 rounded border border-white/10 text-[9px] uppercase font-bold text-[#a1a1aa] hover:border-white/20 hover:text-white transition-all bg-white/5"
+                                                >
+                                                    {isPickingFile ? '...' : selectedFile ? 'Change' : 'Pick'}
+                                                </button>
+                                            </motion.div>
+                                        ) : (
+                                            <motion.div
+                                                initial={{ opacity: 0, y: 5 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                className="flex items-center gap-2.5 px-4 py-3 rounded-xl border border-[#22c55e]/30 bg-[#22c55e]/5"
+                                            >
+                                                <Globe size={13} style={{ color: '#22c55e' }} />
+                                                <div>
+                                                    <div className="text-[10px] uppercase tracking-widest mb-0.5 text-[#71717a]">
+                                                        Context Mode
+                                                    </div>
+                                                    <div className="text-xs font-bold text-[#22c55e]">
+                                                        Full Project Mapping
+                                                    </div>
+                                                </div>
+                                            </motion.div>
+                                        )}
                                     </div>
 
                                     {/* ── DEFAULT: Routing badge ──────────────────────────────

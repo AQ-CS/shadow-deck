@@ -208,10 +208,6 @@ export function Shell({
             >
                 {/* Logo + FIX #7: Change Project button */}
                 <div className="flex items-center gap-2.5" style={{ WebkitAppRegion: 'no-drag' }}>
-                    <div className="relative flex items-center justify-center w-[16px] h-[16px] mt-0.5">
-                        <img src="/sdeck.png" alt="ShadowDeck" className="absolute inset-0 w-full h-full object-contain" />
-                        <div className="absolute inset-0 pointer-events-none" style={{ backgroundColor: accentColor, mixBlendMode: 'color' }} />
-                    </div>
                     <span className="text-sm font-bold tracking-[0.22em] uppercase" style={{ color: textPrimary }}>
                         Shadow<span style={{ color: accentColor }}>Deck</span>
                     </span>
@@ -343,12 +339,6 @@ export function Shell({
                         transition: 'background 0.5s ease',
                     }}
                 >
-                    {/* S-Deck logomark */}
-                    <div className="mb-2 relative flex items-center justify-center w-8 h-8">
-                        <img src="/sdeck.png" alt="ShadowDeck" className="absolute inset-0 w-full h-full object-contain" />
-                        <div className="absolute inset-0 pointer-events-none" style={{ backgroundColor: accentColor, mixBlendMode: 'color' }} />
-                    </div>
-
                     {NAV.map(({ id, icon: Icon, label }) => {
                         const isActive = id === 'history' ? historyOpen : activeView === id;
                         return (

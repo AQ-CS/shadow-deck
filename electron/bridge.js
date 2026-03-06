@@ -302,11 +302,18 @@ export function startBridge(mainWindow, userDataPath) {
     app.get('/project/file', (req, res) => {
         if (!activeProjectPath) return res.status(400).json({ error: 'No project connected' });
         const rel = req.query.rel;
-        if (!rel || typeof String(rel) !== 'string') return res.status(400).json({ error: 'Missing ?rel= parameter' });
+        const abs = req.query.abs;
 
-        const absPath = path.resolve(activeProjectPath, String(rel));
-        if (!absPath.startsWith(path.resolve(activeProjectPath))) {
-            return res.status(403).json({ error: 'Path traversal rejected' });
+        let absPath;
+        if (abs) {
+            absPath = path.resolve(abs);
+        } else if (rel) {
+            absPath = path.resolve(activeProjectPath, String(rel));
+            if (!absPath.startsWith(path.resolve(activeProjectPath))) {
+                return res.status(403).json({ error: 'Path traversal rejected' });
+            }
+        } else {
+            return res.status(400).json({ error: 'Missing ?rel= or ?abs= parameter' });
         }
 
         try {
@@ -470,6 +477,13 @@ export function startBridge(mainWindow, userDataPath) {
     // ── Store: Config ─────────────────────────────────────────────────────────
     app.get('/store/config', (_req, res) => res.json(getConfig()));
     app.post('/store/config', (req, res) => res.json(setConfig(req.body)));
+
+    // ── Store: Usage ──────────────────────────────────────────────────────────
+    app.post('/store/usage', (req, res) => {
+        const { provider, inputTokens, outputTokens } = req.body;
+        if (!provider) return res.status(400).json({ error: 'Missing provider' });
+        res.json(incrementUsage(provider, inputTokens, outputTokens));
+    });
 
     // ── Store: History ────────────────────────────────────────────────────────
     app.get('/store/history', (_req, res) => res.json(getHistory()));

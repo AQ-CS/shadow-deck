@@ -50,6 +50,7 @@ function createWindow() {
         height: 900,
         frame: false, // THE BEAST LOOK (No title bar)
         backgroundColor: '#050505', // Void Black
+        icon: path.join(__dirname, '../public/sdeck.png'),
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false, // Giving React full power (Security trade-off for personal tool)
@@ -58,8 +59,11 @@ function createWindow() {
     });
 
     // Load the React App
-    const startUrl = process.env.ELECTRON_START_URL || `file://${path.join(__dirname, '../dist/index.html')}`;
-    mainWindow.loadURL(startUrl);
+    if (process.env.ELECTRON_START_URL) {
+        mainWindow.loadURL(process.env.ELECTRON_START_URL);
+    } else {
+        mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    }
 
     // Forward renderer console logs to the main process terminal
     mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
@@ -100,6 +104,24 @@ function createWindow() {
             });
         } catch (error) {
             console.error('[MAIN] error in dialog:openDirectory:', error);
+            return { canceled: true, filePaths: [] };
+        }
+    });
+
+    // ── File picker for Laboratory ──
+    ipcMain.handle('dialog:openFile', async () => {
+        try {
+            if (!mainWindow || mainWindow.isDestroyed()) return { canceled: true, filePaths: [] };
+            return await dialog.showOpenDialog(mainWindow, {
+                properties: ['openFile'],
+                title: 'Select Source File',
+                filters: [
+                    { name: 'Source Files', extensions: ['js', 'jsx', 'ts', 'tsx', 'json', 'py', 'go', 'md', 'txt'] },
+                    { name: 'All Files', extensions: ['*'] }
+                ]
+            });
+        } catch (error) {
+            console.error('[MAIN] error in dialog:openFile:', error);
             return { canceled: true, filePaths: [] };
         }
     });
