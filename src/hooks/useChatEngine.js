@@ -205,27 +205,53 @@ async function streamOllama({ system, user, model }, onChunk, signal, ollamaUrl)
 // The final non-[DONE] chunk will carry chunk.usage — we capture it.
 
 async function streamOpenAICompat({ baseURL, apiKey, model, messages, temperature = 0.1 }, onChunk, signal) {
-    const res = await fetch(baseURL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-            model,
-            messages,
-            stream: true,
-            temperature,
-            max_tokens: 4096,
-            stream_options: { include_usage: true },   // ← TOKEN TRACKING REQUIREMENT
-        }),
-        signal,
-    });
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+    let res;
 
-    if (!res.ok) {
-        const errText = await res.text();
-        const hostname = new URL(baseURL).hostname;
-        throw new Error(`${hostname} error ${res.status}: ${errText.slice(0, 300)}`);
+    while (attempt <= MAX_RETRIES) {
+        try {
+            res = await fetch(baseURL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    model,
+                    messages,
+                    stream: true,
+                    temperature,
+                    max_tokens: 4096,
+                    stream_options: { include_usage: true },   // ← TOKEN TRACKING REQUIREMENT
+                }),
+                signal,
+            });
+
+            if (res.ok) break;
+
+            if (res.status === 429) {
+                if (attempt === MAX_RETRIES) throw new Error('Rate limit exceeded (429) - Max retries reached');
+                const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 10000);
+                onChunk(`\n[Rate limited. Retrying in ${(delay/1000).toFixed(1)}s...]`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                attempt++;
+                continue;
+            }
+
+            const errText = await res.text();
+            const hostname = new URL(baseURL).hostname;
+            throw new Error(`${hostname} error ${res.status}: ${errText.slice(0, 300)}`);
+        } catch (err) {
+            if (err.name === 'AbortError') throw err;
+            if (attempt === MAX_RETRIES) throw err;
+            if (!err.message.includes('Rate limit')) throw err;
+            attempt++;
+        }
+    }
+
+    if (!res || !res.ok) {
+        throw new Error('Failed to fetch after retries');
     }
     if (!res.body) throw new Error('Provider returned empty response body');
 
@@ -442,7 +468,8 @@ export function useChatEngine({ projectRoot = null, onBridgeError = null } = {})
                 case AGENT_TYPES.INQUISITOR:
                 case AGENT_TYPES.FORGER:
                 case AGENT_TYPES.ARCHITECT:
-                case AGENT_TYPES.ORACLE: {
+                case AGENT_TYPES.ORACLE:
+                case AGENT_TYPES.OPTIMIZER: {
                     const scopeMode = payload.scopeMode || 'file';
                     const filePath = payload.filePath;
 
@@ -648,6 +675,18 @@ export function useChatEngine({ projectRoot = null, onBridgeError = null } = {})
                     pushLog('SUCCESS',
                         `[ARCHITECT] Refactor complete — ${patchCount} patch(es) emitted. Copy from stream above.`
                     );
+                    break;
+                }
+
+                case AGENT_TYPES.OPTIMIZER: {
+                    if (clean.includes('OPTIMIZER: MAXIMUM EFFICIENCY ACHIEVED')) {
+                        pushLog('SUCCESS', `[OPTIMIZER] ${filename} → MAXIMUM EFFICIENCY ACHIEVED`);
+                    } else {
+                        const patchCount = (clean.match(/^```\d+:\d+:/gm) || []).length;
+                        pushLog('WARNING',
+                            `[OPTIMIZER] ${filename} → ${patchCount} optimization patch(es) emitted. See stream above.`
+                        );
+                    }
                     break;
                 }
 

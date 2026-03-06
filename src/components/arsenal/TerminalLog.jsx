@@ -35,7 +35,7 @@ function normalizeLog(entry, index) {
 }
 
 // ── Log Line Component ───────────────────────────
-function LogLine({ log }) {
+const LogLine = React.memo(({ log }) => {
     const config = SEVERITY_CONFIG[log.type] || DEFAULT_SEVERITY;
 
     return (
@@ -84,23 +84,56 @@ function LogLine({ log }) {
             </span>
         </motion.div>
     );
-}
+});
+LogLine.displayName = 'LogLine';
+
+// ── Stream Buffer Component ──────────────────────
+const StreamBuffer = React.memo(({ buffer, isRunning }) => {
+    if (!isRunning && !buffer) return null;
+
+    return (
+        <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="mt-2 text-sm text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed px-2 py-1 rounded bg-white/[0.02]"
+        >
+            {buffer}
+            {isRunning && (
+                <motion.span
+                    animate={{ opacity: [1, 0] }}
+                    transition={{ repeat: Infinity, duration: 0.8 }}
+                    className="inline-block w-2 h-4 bg-teal-500 ml-1 align-middle"
+                />
+            )}
+        </motion.div>
+    );
+});
+StreamBuffer.displayName = 'StreamBuffer';
 
 // ═══════════════════════════════════════════════════════════════
 //  TERMINAL LOG — The Hyper-Speed Feed
 // ═══════════════════════════════════════════════════════════════
-export function TerminalLog({ logs = [], className }) {
+export function TerminalLog({ logs = [], streamBuffer = '', isRunning = false, className }) {
     const scrollRef = useRef(null);
 
-    // Auto-scroll to bottom on new logs
+    // Auto-scroll to bottom on new logs or buffer update
     useEffect(() => {
         const el = scrollRef.current;
-        if (el) {
-            el.scrollTop = el.scrollHeight;
-        }
-    }, [logs]);
+        if (!el) return;
 
-    const normalized = logs.map(normalizeLog);
+        let frame;
+        const scrollToBottom = () => {
+            el.scrollTop = el.scrollHeight;
+        };
+        frame = requestAnimationFrame(scrollToBottom);
+
+        return () => {
+            if (frame) cancelAnimationFrame(frame);
+        };
+    }, [logs, streamBuffer, isRunning]);
+
+    const normalized = React.useMemo(() => logs.map(normalizeLog), [logs]);
 
     return (
         <div
@@ -181,6 +214,7 @@ export function TerminalLog({ logs = [], className }) {
                         ))
                     )}
                 </AnimatePresence>
+                <StreamBuffer buffer={streamBuffer} isRunning={isRunning} />
             </div>
 
             {/* ── Bottom Edge Glow ── */}

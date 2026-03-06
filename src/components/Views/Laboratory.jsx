@@ -90,6 +90,13 @@ const COUNCIL = [
         icon: '🔮',
         color: '#a855f7',
     },
+    {
+        key: AGENT_TYPES.OPTIMIZER,
+        label: 'The Optimizer',
+        role: 'Performance Tuning',
+        icon: '⚡',
+        color: '#10b981',
+    },
 ];
 
 // ── Provider Badge ─────────────────────────────────────────────────────────────

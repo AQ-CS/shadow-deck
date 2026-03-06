@@ -59,7 +59,15 @@ export function startBridge(mainWindow, userDataPath) {
     const app = express();
     const PORT = 9090;
 
-    app.use(cors());
+    app.use(cors({
+        origin: function (origin, callback) {
+            if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error('CORS blocked cross-origin request'));
+            }
+        }
+    }));
     app.use(express.json({ limit: '5mb' }));
 
     // ── IDE Analyze Endpoint ─────────────────────────────────────────────────
@@ -307,6 +315,9 @@ export function startBridge(mainWindow, userDataPath) {
         let absPath;
         if (abs) {
             absPath = path.resolve(abs);
+            if (!absPath.startsWith(path.resolve(activeProjectPath))) {
+                return res.status(403).json({ error: 'Path traversal rejected' });
+            }
         } else if (rel) {
             absPath = path.resolve(activeProjectPath, String(rel));
             if (!absPath.startsWith(path.resolve(activeProjectPath))) {
@@ -401,7 +412,7 @@ export function startBridge(mainWindow, userDataPath) {
             const resolved = path.resolve(reqCwd);
             // Only allow cwd inside the active project or a temp dir
             if (activeProjectPath && !resolved.startsWith(path.resolve(activeProjectPath))) {
-                console.warn(`[BRIDGE/exec] cwd outside project — falling back to project root`);
+                return res.status(403).json({ error: 'cwd path traversal rejected' });
             } else {
                 execCwd = resolved;
             }

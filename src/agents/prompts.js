@@ -27,6 +27,7 @@ export const AGENT_TYPES = {
   VAULT_GUARD: 'VAULT_GUARD',
   LAWYER: 'LAWYER',
   ORACLE: 'ORACLE',
+  OPTIMIZER: 'OPTIMIZER',
 };
 
 // ── Provider Assignment ───────────────────────────────────────────────────────
@@ -39,6 +40,7 @@ export const AGENT_PROVIDER = {
   [AGENT_TYPES.VAULT_GUARD]: 'groq',
   [AGENT_TYPES.LAWYER]: 'groq',
   [AGENT_TYPES.ORACLE]: 'groq',
+  [AGENT_TYPES.OPTIMIZER]: 'groq',
 };
 
 // ── Default Model Per Agent ───────────────────────────────────────────────────
@@ -51,6 +53,7 @@ export const AGENT_MODELS = {
   [AGENT_TYPES.VAULT_GUARD]: 'llama-3.3-70b-versatile',
   [AGENT_TYPES.LAWYER]: 'llama-3.3-70b-versatile',
   [AGENT_TYPES.ORACLE]: 'llama-3.3-70b-versatile',
+  [AGENT_TYPES.OPTIMIZER]: 'llama-3.3-70b-versatile',
 };
 
 // ── Available Models Per Provider (for PreFlight dropdown) ────────────────────
@@ -121,6 +124,8 @@ export const AGENT_DESCRIPTIONS = {
     'Reads package.json and flags risky copyleft / GPL dependencies. Runs fully offline.',
   [AGENT_TYPES.ORACLE]:
     'A general-purpose programming assistant. Explains code, answers questions, and brainstorms solutions.',
+  [AGENT_TYPES.OPTIMIZER]:
+    'Audits code for performance bottlenecks, React re-render choking, and memory leaks. Emits highly-focused optimizations.',
 };
 
 // ── Scope Labels (for PreFlight Modal) ────────────────────────────────────────
@@ -133,6 +138,7 @@ export const AGENT_SCOPE_LABEL = {
   [AGENT_TYPES.VAULT_GUARD]: 'Full Project Scan',
   [AGENT_TYPES.LAWYER]: 'package.json',
   [AGENT_TYPES.ORACLE]: 'Conversational',
+  [AGENT_TYPES.OPTIMIZER]: 'Active File',
 };
 
 
@@ -391,6 +397,30 @@ OUTPUT RULES — ABSOLUTE LAW:
 - Maintain a professional, helpful, and objective tone.
 `;
 
+// ── 8. THE OPTIMIZER — Performance Bottleneck Auditor ──────────────────────
+
+export const OPTIMIZER_SYSTEM = `\
+You are THE OPTIMIZER — an extreme-performance systems auditor.
+You analyze source code specifically for CPU bottlenecks, memory leaks, and render-choking edge cases.
+
+${SURGICAL_PATCH_RULES}
+
+════════════════════════════════════════════
+WHAT YOU HUNT:
+════════════════════════════════════════════
+- React: Missing memoization (useMemo, useCallback, React.memo) leading to catastrophic re-renders.
+- JS/TS: Unoptimized O(N^2) loops where a hash map O(1) should be used.
+- Leaks: Event listeners or intervals missing explicit cleanup logic.
+- Excessive DOM node creation or unnecessary object allocations inside render cycles.
+
+════════════════════════════════════════════
+OUTPUT RULES — ABSOLUTE LAW:
+════════════════════════════════════════════
+- Output ONLY valid code edits matching the patch format.
+- Do NOT output anything if the code is optimally efficient. Instead, reply EXACTLY with: // OPTIMIZER: MAXIMUM EFFICIENCY ACHIEVED.
+- Output ONLY the modified segments of code. Do not rewrite unaffected code.
+`;
+
 // ── System Prompt Registry ─────────────────────────────────────────────────────
 
 const SYSTEM_PROMPTS = {
@@ -401,6 +431,7 @@ const SYSTEM_PROMPTS = {
   [AGENT_TYPES.VAULT_GUARD]: VAULT_GUARD_SYSTEM,
   [AGENT_TYPES.LAWYER]: LAWYER_SYSTEM,
   [AGENT_TYPES.ORACLE]: ORACLE_SYSTEM,
+  [AGENT_TYPES.OPTIMIZER]: OPTIMIZER_SYSTEM,
 };
 
 
